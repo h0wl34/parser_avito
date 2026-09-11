@@ -1,0 +1,28 @@
+[deal_watcher]
+enabled = false
+notify_score = 80
+market_window_days = 30
+min_market_samples = 5
+database_path = "database.db"
+
+[series_bonus]
+"ThinkBook 16+" = 15
+"ThinkBook 16p" = 15
+"ROG Zephyrus" = 15
+"Yoga Pro" = 14
+"ProArt" = 14
+"Legion 7" = 12
+"Legion 5" = 10
+"TUF" = 5
+"Omen" = 7
+"Predator" = 5
+"MSI Katana" = -8
+"MSI Cyborg" = -12
+"MSI Thin" = -18
+
+[gpu_thresholds]
+"RTX 4080" = 125000
+"RTX 4070" = 100000
+"RTX 5070" = 125000
+"RTX 5060" = 110000
+"RTX 5050" = 90000
