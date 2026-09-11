@@ -83,6 +83,7 @@ class LaptopDealAvitoParse(AvitoParse):
             return filtered_ads
 
         notify_ads = []
+        processed_ads = []
         source_url = self.profile.url if self.profile else None
 
         for ad in filtered_ads:
@@ -92,12 +93,14 @@ class LaptopDealAvitoParse(AvitoParse):
                     source_url=source_url,
                 )
                 if analysis is None:
-                    # Fail open only for FAST mode. MARKET is silent by
-                    # definition and exists only to build statistics.
+                    # FAST fails open to avoid missing a deal. MARKET retries
+                    # malformed/unanalysed records on the next cycle.
                     if not self.profile or self.profile.notify:
                         notify_ads.append(ad)
+                        processed_ads.append(ad)
                     continue
 
+                processed_ads.append(ad)
                 ad.dealAnalysis = analysis
                 logger.info(
                     "deal profile={} score={} label={} price={} title={!r}",
@@ -120,11 +123,15 @@ class LaptopDealAvitoParse(AvitoParse):
                     err,
                 )
                 if not self.profile or self.profile.notify:
+                    # FAST is fail-open and remembers the listing after the
+                    # fallback notification. MARKET leaves it unseen to retry.
                     notify_ads.append(ad)
+                    processed_ads.append(ad)
 
-        # Low-score and MARKET-only ads must not be reanalysed every cycle.
-        # Price changes still re-enter because price is part of the seen key.
-        self._AvitoParse__save_viewed(filtered_ads)
+        # Low-score and successfully analysed MARKET ads must not be reanalysed
+        # every cycle. Price changes still re-enter because price is part of
+        # the seen key.
+        self._AvitoParse__save_viewed(processed_ads)
 
         logger.info(
             "Laptop Deal Watcher: profile={} {} candidates -> {} notifications",
@@ -175,10 +182,24 @@ def _run_profile_scheduler(base_config, profiles: list[SearchProfile]) -> None:
                 profile.mode,
                 profile.pages,
             )
-            parsers[profile.name].parse()
-            next_run[profile.name] = (
-                time.monotonic() + profile.interval_seconds
-            )
+            try:
+                parsers[profile.name].parse()
+                next_run[profile.name] = (
+                    time.monotonic() + profile.interval_seconds
+                )
+            except Exception as err:
+                logger.exception(
+                    "Профиль {} завершился ошибкой: {}",
+                    profile.name,
+                    err,
+                )
+                retry_in = min(60, profile.interval_seconds)
+                next_run[profile.name] = time.monotonic() + retry_in
+                logger.warning(
+                    "Профиль {} будет повторён через {} сек.",
+                    profile.name,
+                    retry_in,
+                )
 
         if base_config.one_time_start:
             logger.info("Все поисковые профили обработаны один раз")
