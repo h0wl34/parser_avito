@@ -56,6 +56,14 @@ class DealWatcherStore:
                     PRIMARY KEY (avito_id, observed_at, price)
                 );
 
+                CREATE TABLE IF NOT EXISTS deal_seen (
+                    profile TEXT NOT NULL,
+                    avito_id INTEGER NOT NULL,
+                    price INTEGER NOT NULL,
+                    seen_at TEXT NOT NULL,
+                    PRIMARY KEY (profile, avito_id, price)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_deal_prices_time
                     ON deal_prices(observed_at);
                 CREATE INDEX IF NOT EXISTS idx_deal_listings_gpu
@@ -141,6 +149,41 @@ class DealWatcherStore:
         if previous and previous["price"] and previous["price"] > price:
             return (previous["price"] - price) / previous["price"] * 100
         return None
+
+    def is_seen(self, profile: str, avito_id: int, price: int) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM deal_seen
+                WHERE profile = ? AND avito_id = ? AND price = ?
+                """,
+                (profile, avito_id, price),
+            ).fetchone()
+        return row is not None
+
+    def mark_seen(
+        self,
+        profile: str,
+        records: list[tuple[int, int]],
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        if not records:
+            return
+        stamp = (observed_at or datetime.now(timezone.utc)).isoformat()
+        rows = [
+            (profile, avito_id, price, stamp)
+            for avito_id, price in records
+        ]
+        with self._connection() as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO deal_seen
+                    (profile, avito_id, price, seen_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
 
     def market_stats(
         self,
