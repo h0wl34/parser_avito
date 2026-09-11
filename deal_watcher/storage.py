@@ -46,6 +46,7 @@ class DealWatcherStore:
                     ram_gb INTEGER,
                     storage_gb INTEGER,
                     condition TEXT,
+                    risk_score INTEGER NOT NULL DEFAULT 0,
                     source_url TEXT
                 );
 
@@ -74,6 +75,29 @@ class DealWatcherStore:
                     ON deal_listings(sku, gpu);
                 """
             )
+            self._ensure_column(
+                conn,
+                table="deal_listings",
+                column="risk_score",
+                definition="INTEGER NOT NULL DEFAULT 0",
+            )
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
 
     def record_listing(
         self,
@@ -84,6 +108,7 @@ class DealWatcherStore:
         url: str | None,
         price: int,
         specs: LaptopSpecs,
+        risk_score: int = 0,
         source_url: str | None = None,
         published_at: datetime | None = None,
         observed_at: datetime | None = None,
@@ -104,8 +129,8 @@ class DealWatcherStore:
                 INSERT INTO deal_listings (
                     avito_id, title, seller_id, url, first_seen, last_seen,
                     published_at, brand, family, sku, cpu, gpu, ram_gb,
-                    storage_gb, condition, source_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    storage_gb, condition, risk_score, source_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(avito_id) DO UPDATE SET
                     title=excluded.title,
                     seller_id=excluded.seller_id,
@@ -119,6 +144,7 @@ class DealWatcherStore:
                     ram_gb=excluded.ram_gb,
                     storage_gb=excluded.storage_gb,
                     condition=excluded.condition,
+                    risk_score=excluded.risk_score,
                     source_url=excluded.source_url
                 """,
                 (
@@ -137,6 +163,7 @@ class DealWatcherStore:
                     specs.ram_gb,
                     specs.storage_gb,
                     specs.condition.value,
+                    risk_score,
                     source_url,
                 ),
             )
@@ -207,6 +234,8 @@ class DealWatcherStore:
                       FROM deal_prices dp2
                       WHERE dp2.avito_id = dp.avito_id
                   )
+                  AND dl.risk_score <= 10
+                  AND dl.condition NOT IN ('USED', 'REFURBISHED', 'BROKEN')
                   AND {where}
             """
             args: list[object] = [cutoff, *params]
