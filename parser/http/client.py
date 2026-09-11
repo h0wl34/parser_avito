@@ -9,6 +9,15 @@ from parser.cookies.base import CookiesProvider
 from parser.proxies.proxy import Proxy
 
 
+class BlockedAccessError(RuntimeError):
+    """Raised when the remote endpoint explicitly rejects access."""
+
+    def __init__(self, status_code: int, url: str):
+        self.status_code = int(status_code)
+        self.url = url
+        super().__init__(f"Access blocked with HTTP {status_code}: {url}")
+
+
 class HttpClient:
     def __init__(
         self,
@@ -18,6 +27,8 @@ class HttpClient:
         max_retries: int = 5,
         retry_delay: int = 5,
         block_threshold: int = 3,
+        stop_on_block: bool = False,
+        block_statuses: tuple[int, ...] = (403, 429, 439),
     ):
         self.proxy = proxy
         self.cookies = cookies
@@ -25,6 +36,8 @@ class HttpClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.block_threshold = block_threshold
+        self.stop_on_block = stop_on_block
+        self.block_statuses = tuple(block_statuses)
 
         self._block_attempts = 0
         self._client = self._build_client()
@@ -89,17 +102,16 @@ class HttpClient:
                     **kwargs,
                 )
 
-                if self.cookies:
-                    self.cookies.update(response)
-
-                print(response.url)
-                if response.status_code in (403, 429, 439):
-                    self._block_attempts += 1
+                if response.status_code in self.block_statuses:
                     logger.warning(
-                        f"Запрос заблокирован ({response.status_code}) к {url}, "
-                        f"попытка {self._block_attempts}"
+                        "Запрос отклонён HTTP {} к {}",
+                        response.status_code,
+                        url,
                     )
+                    if self.stop_on_block:
+                        raise BlockedAccessError(response.status_code, url)
 
+                    self._block_attempts += 1
                     if self._block_attempts >= self.block_threshold:
                         logger.warning("Достигнут лимит блокировок, запускается обработка")
                         if self.cookies:
@@ -111,10 +123,15 @@ class HttpClient:
                     time.sleep(self.retry_delay)
                     continue
 
+                if self.cookies:
+                    self.cookies.update(response)
+
                 self._block_attempts = 0
                 response.raise_for_status()
                 return response
 
+            except BlockedAccessError:
+                raise
             except requests.RequestsError as e:
                 last_exc = e
                 self._block_attempts = 0
