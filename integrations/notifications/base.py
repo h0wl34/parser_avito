@@ -18,6 +18,14 @@ class Notifier(ABC):
 
     # default форматирование
     def format(self, ad: Item) -> str:
+        analysis = getattr(ad, "dealAnalysis", None)
+        if analysis is not None:
+            # Lazy import avoids coupling the generic notification layer to the
+            # optional laptop-deal extension during normal upstream use.
+            from deal_watcher.formatter import format_deal_markdown
+
+            return format_deal_markdown(ad=ad, analysis=analysis)
+
         price = escape_markdown_v2(get_price(ad))
         title = escape_markdown_v2(getattr(ad, "title", ""))
         seller = escape_markdown_v2(str(getattr(ad, "sellerId", "")))
