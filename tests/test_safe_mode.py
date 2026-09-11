@@ -6,13 +6,20 @@ import unittest
 from unittest.mock import patch
 
 from deal_watcher.config import SafetyConfig, load_deal_watcher_config
-from deal_watcher.search_profiles import SearchProfile
-from deal_watcher_runner import (
+from deal_watcher.safety import (
     HourlyRequestBudget,
-    _jittered_interval,
-    _validate_safe_runtime,
+    jittered_interval,
+    validate_safe_runtime,
 )
-from dto import AvitoConfig
+from deal_watcher.search_profiles import SearchProfile
+
+
+class DummyConfig:
+    use_own_cookies = False
+    use_bypass_api = False
+    proxy_change_url = ""
+    parse_views = False
+    parse_phone = False
 
 
 class SafetyConfigTests(unittest.TestCase):
@@ -44,14 +51,16 @@ block_statuses = [403, 429]
             self.assertEqual(config.safety.block_statuses, (403, 429))
 
     def test_safe_mode_rejects_account_cookies(self):
-        config = AvitoConfig(urls=[], use_own_cookies=True)
+        config = DummyConfig()
+        config.use_own_cookies = True
         with self.assertRaisesRegex(ValueError, "use_own_cookies"):
-            _validate_safe_runtime(config, SafetyConfig())
+            validate_safe_runtime(config, SafetyConfig())
 
     def test_safe_mode_rejects_enrichment_requests(self):
-        config = AvitoConfig(urls=[], parse_views=True)
+        config = DummyConfig()
+        config.parse_views = True
         with self.assertRaisesRegex(ValueError, "parse_views"):
-            _validate_safe_runtime(config, SafetyConfig())
+            validate_safe_runtime(config, SafetyConfig())
 
 
 class SchedulerSafetyTests(unittest.TestCase):
@@ -76,8 +85,8 @@ class SchedulerSafetyTests(unittest.TestCase):
             interval_seconds=600,
             pages=1,
         )
-        with patch("deal_watcher_runner.random.uniform", return_value=500.0):
-            self.assertEqual(_jittered_interval(profile, safety), 500.0)
+        with patch("deal_watcher.safety.random.uniform", return_value=500.0):
+            self.assertEqual(jittered_interval(profile, safety), 500.0)
 
         too_fast = SearchProfile(
             name="fast-floor",
@@ -86,8 +95,8 @@ class SchedulerSafetyTests(unittest.TestCase):
             interval_seconds=120,
             pages=1,
         )
-        with patch("deal_watcher_runner.random.uniform", return_value=250.0):
-            self.assertEqual(_jittered_interval(too_fast, safety), 300.0)
+        with patch("deal_watcher.safety.random.uniform", return_value=250.0):
+            self.assertEqual(jittered_interval(too_fast, safety), 300.0)
 
 
 if __name__ == "__main__":
