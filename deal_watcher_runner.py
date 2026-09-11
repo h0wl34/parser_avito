@@ -1,15 +1,47 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import replace
+import random
 import time
 
 from loguru import logger
 
 from deal_watcher import DealWatcherService, load_deal_watcher_config
+from deal_watcher.config import SafetyConfig
 from deal_watcher.search_profiles import SearchProfile, load_search_profiles
+from integrations.notifications.utils import escape_markdown_v2
 from load_config import load_avito_config
+from parser.http.client import BlockedAccessError
 from parser_cls import AvitoParse
-from lang import SPFA_PROXY_REQUIRED
+
+
+class HourlyRequestBudget:
+    """Conservative rolling budget based on expected catalog page requests."""
+
+    def __init__(self, limit: int):
+        self.limit = int(limit)
+        self.events: deque[float] = deque()
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - 3600.0
+        while self.events and self.events[0] <= cutoff:
+            self.events.popleft()
+
+    def seconds_until_available(self, units: int, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        self._prune(now)
+        if len(self.events) + units <= self.limit:
+            return 0.0
+        required_to_expire = len(self.events) + units - self.limit
+        release_at = self.events[required_to_expire - 1] + 3600.0
+        return max(0.0, release_at - now)
+
+    def consume(self, units: int, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self._prune(now)
+        for _ in range(max(0, units)):
+            self.events.append(now)
 
 
 class LaptopDealAvitoParse(AvitoParse):
@@ -31,12 +63,18 @@ class LaptopDealAvitoParse(AvitoParse):
             else None
         )
 
+        safety = self.deal_config.safety
+        if safety.enabled:
+            self.http.stop_on_block = safety.stop_on_block
+            self.http.block_statuses = tuple(safety.block_statuses)
+
         if self.deal_watcher:
             logger.info(
-                "Laptop Deal Watcher включён: profile={} mode={} notify_score={}",
+                "Laptop Deal Watcher включён: profile={} mode={} notify_score={} safe_mode={}",
                 self.profile.name if self.profile else "default",
                 self.profile.mode if self.profile else "fast",
                 self.deal_config.notify_score,
+                safety.enabled,
             )
         else:
             logger.warning(
@@ -45,12 +83,26 @@ class LaptopDealAvitoParse(AvitoParse):
                 deal_config_path,
             )
 
-    def is_viewed(self, ad) -> bool:
-        """Use profile-scoped dedupe when watcher mode is active.
+    def fetch_api_data(self, api_url: str, page: int) -> dict | None:
+        """Keep explicit access blocks visible to the safe scheduler."""
+        if self.stop_event and self.stop_event.is_set():
+            return None
 
-        MARKET seeing a listing must not hide it from FAST, therefore the seen
-        key is (profile, avito_id, price), not the upstream global (id, price).
-        """
+        page_url = self._api_url_for_page(api_url, page)
+        try:
+            response = self.http.request("GET", page_url)
+            self.good_request_count += 1
+            return response.json()
+        except BlockedAccessError:
+            self.bad_request_count += 1
+            raise
+        except Exception as err:
+            self.bad_request_count += 1
+            logger.warning(f"Ошибка при запросе API {page_url}: {err}")
+            return None
+
+    def is_viewed(self, ad) -> bool:
+        """Use profile-scoped dedupe when watcher mode is active."""
         if self.deal_watcher and self.profile:
             price_detailed = getattr(ad, "priceDetailed", None)
             price = getattr(price_detailed, "value", None)
@@ -93,8 +145,6 @@ class LaptopDealAvitoParse(AvitoParse):
                     source_url=source_url,
                 )
                 if analysis is None:
-                    # FAST fails open to avoid missing a deal. MARKET retries
-                    # malformed/unanalysed records on the next cycle.
                     if not self.profile or self.profile.notify:
                         notify_ads.append(ad)
                         processed_ads.append(ad)
@@ -123,14 +173,9 @@ class LaptopDealAvitoParse(AvitoParse):
                     err,
                 )
                 if not self.profile or self.profile.notify:
-                    # FAST is fail-open and remembers the listing after the
-                    # fallback notification. MARKET leaves it unseen to retry.
                     notify_ads.append(ad)
                     processed_ads.append(ad)
 
-        # Low-score and successfully analysed MARKET ads must not be reanalysed
-        # every cycle. Price changes still re-enter because price is part of
-        # the seen key.
         self._AvitoParse__save_viewed(processed_ads)
 
         logger.info(
@@ -142,7 +187,39 @@ class LaptopDealAvitoParse(AvitoParse):
         return notify_ads
 
 
-def _build_profile_parser(base_config, profile: SearchProfile):
+def _validate_safe_runtime(base_config, safety: SafetyConfig) -> None:
+    if not safety.enabled:
+        return
+
+    problems: list[str] = []
+    if safety.require_anonymous:
+        if base_config.use_own_cookies:
+            problems.append("use_own_cookies must be false")
+        if base_config.use_bypass_api:
+            problems.append("use_bypass_api must be false")
+        if base_config.proxy_change_url:
+            problems.append("proxy_change_url must be empty in safe mode")
+
+    if safety.disable_enrichment_requests:
+        if base_config.parse_views:
+            problems.append("parse_views must be false")
+        if base_config.parse_phone:
+            problems.append("parse_phone must be false")
+
+    if problems:
+        joined = "; ".join(problems)
+        raise ValueError(f"SAFE MODE refused to start: {joined}")
+
+
+def _build_profile_parser(
+    base_config,
+    profile: SearchProfile,
+    safety: SafetyConfig,
+):
+    interval = profile.interval_seconds
+    if safety.enabled:
+        interval = max(interval, safety.min_profile_interval_seconds)
+
     profile_config = replace(
         base_config,
         urls=[profile.url],
@@ -153,27 +230,99 @@ def _build_profile_parser(base_config, profile: SearchProfile):
             if profile.max_age_seconds is not None
             else base_config.max_age
         ),
+        max_count_of_retry=(1 if safety.enabled else base_config.max_count_of_retry),
     )
-    return LaptopDealAvitoParse(profile_config, profile=profile)
+    effective_profile = replace(profile, interval_seconds=interval)
+    return LaptopDealAvitoParse(profile_config, profile=effective_profile)
 
 
-def _run_profile_scheduler(base_config, profiles: list[SearchProfile]) -> None:
-    # MARKET runs first at startup so the first FAST pass can already use the
-    # freshly collected baseline.
+def _jittered_interval(profile: SearchProfile, safety: SafetyConfig) -> float:
+    base = float(profile.interval_seconds)
+    if not safety.enabled:
+        return base
+    base = max(base, float(safety.min_profile_interval_seconds))
+    spread = base * safety.interval_jitter_ratio
+    return max(
+        float(safety.min_profile_interval_seconds),
+        random.uniform(base - spread, base + spread),
+    )
+
+
+def _schedule_after_global_block(
+    *,
+    profiles: list[SearchProfile],
+    next_run: dict[str, float],
+    safety: SafetyConfig,
+) -> float:
+    now = time.monotonic()
+    resume_at = now + safety.cooldown_after_block_seconds
+    for profile in profiles:
+        spread = random.uniform(0, safety.startup_spread_seconds)
+        next_run[profile.name] = max(next_run[profile.name], resume_at + spread)
+    return resume_at
+
+
+def _notify_block(parser: LaptopDealAvitoParse, err: BlockedAccessError, safety: SafetyConfig) -> None:
+    message = (
+        f"Avito access blocked HTTP {err.status_code}. "
+        f"SAFE MODE pauses all searches for {safety.cooldown_after_block_seconds} seconds"
+    )
+    try:
+        parser.notifier.notify(message=escape_markdown_v2(message))
+    except Exception as notify_err:
+        logger.warning("Не удалось отправить block notification: {}", notify_err)
+
+
+def _run_profile_scheduler(
+    base_config,
+    profiles: list[SearchProfile],
+    safety: SafetyConfig,
+) -> None:
     profiles = sorted(profiles, key=lambda p: 0 if p.mode == "market" else 1)
     parsers = {
-        profile.name: _build_profile_parser(base_config, profile)
+        profile.name: _build_profile_parser(base_config, profile, safety)
         for profile in profiles
     }
-    next_run = {profile.name: 0.0 for profile in profiles}
+    effective_profiles = [parsers[p.name].profile for p in profiles]
+
+    start = time.monotonic()
+    next_run: dict[str, float] = {}
+    market_count = sum(1 for p in effective_profiles if p.mode == "market")
+    for index, profile in enumerate(effective_profiles):
+        if not safety.enabled:
+            next_run[profile.name] = 0.0
+            continue
+        # MARKET gets the first startup window; FAST is shifted into the next
+        # one so baseline collection has a head start without a request burst.
+        lane_offset = 0 if profile.mode == "market" else safety.startup_spread_seconds
+        spread = random.uniform(0, safety.startup_spread_seconds)
+        if profile.mode == "market" and index == 0:
+            spread = 0.0
+        next_run[profile.name] = start + lane_offset + spread
+
+    budget = HourlyRequestBudget(safety.max_requests_per_hour)
 
     while True:
         now = time.monotonic()
         ran_any = False
+        global_block = False
 
-        for profile in profiles:
+        for profile in effective_profiles:
             if now < next_run[profile.name]:
                 continue
+
+            if safety.enabled:
+                budget_wait = budget.seconds_until_available(profile.pages, now)
+                if budget_wait > 0:
+                    extra = random.uniform(5.0, 30.0)
+                    next_run[profile.name] = now + budget_wait + extra
+                    logger.warning(
+                        "Часовой бюджет запросов достигнут; profile={} отложен на {:.0f} сек.",
+                        profile.name,
+                        budget_wait + extra,
+                    )
+                    continue
+                budget.consume(profile.pages, now)
 
             ran_any = True
             logger.info(
@@ -184,19 +333,39 @@ def _run_profile_scheduler(base_config, profiles: list[SearchProfile]) -> None:
             )
             try:
                 parsers[profile.name].parse()
-                next_run[profile.name] = (
-                    time.monotonic() + profile.interval_seconds
+                delay = _jittered_interval(profile, safety)
+                next_run[profile.name] = time.monotonic() + delay
+                logger.info(
+                    "Следующий запуск profile={} примерно через {:.0f} сек.",
+                    profile.name,
+                    delay,
                 )
+            except BlockedAccessError as err:
+                logger.error(
+                    "SAFE MODE: HTTP {} для profile={}; все профили уходят в cooldown.",
+                    err.status_code,
+                    profile.name,
+                )
+                _notify_block(parsers[profile.name], err, safety)
+                _schedule_after_global_block(
+                    profiles=effective_profiles,
+                    next_run=next_run,
+                    safety=safety,
+                )
+                global_block = True
+                break
             except Exception as err:
                 logger.exception(
                     "Профиль {} завершился ошибкой: {}",
                     profile.name,
                     err,
                 )
-                retry_in = min(60, profile.interval_seconds)
+                retry_base = min(300, profile.interval_seconds)
+                retry_jitter = random.uniform(0, 60) if safety.enabled else 0
+                retry_in = retry_base + retry_jitter
                 next_run[profile.name] = time.monotonic() + retry_in
                 logger.warning(
-                    "Профиль {} будет повторён через {} сек.",
+                    "Профиль {} будет повторён через {:.0f} сек.",
                     profile.name,
                     retry_in,
                 )
@@ -204,6 +373,10 @@ def _run_profile_scheduler(base_config, profiles: list[SearchProfile]) -> None:
         if base_config.one_time_start:
             logger.info("Все поисковые профили обработаны один раз")
             return
+
+        if global_block:
+            time.sleep(30.0)
+            continue
 
         if not ran_any:
             sleep_for = min(next_run.values()) - time.monotonic()
@@ -233,21 +406,11 @@ def _run_legacy_loop(config) -> None:
 def main() -> None:
     try:
         config = load_avito_config("config.toml")
+        deal_config = load_deal_watcher_config("deal_watcher.toml")
+        _validate_safe_runtime(config, deal_config.safety)
     except Exception as err:
-        logger.error(f"Ошибка загрузки config.toml: {err}")
+        logger.error("Ошибка конфигурации: {}", err)
         raise SystemExit(1)
-
-    if config.use_bypass_api and not (config.proxy_string or "").strip():
-        logger.critical(
-            f"SPFA не будет работать без прокси. {SPFA_PROXY_REQUIRED}"
-        )
-        raise SystemExit(1)
-
-    if config.use_bypass_api and not config.proxy_change_url:
-        logger.warning(
-            "SPFA запущен со статическим прокси. Увеличьте "
-            "pause_between_links и pause_general при большом числе блокировок."
-        )
 
     try:
         profiles = load_search_profiles("deal_searches.toml")
@@ -257,7 +420,7 @@ def main() -> None:
 
     if profiles:
         try:
-            _run_profile_scheduler(config, profiles)
+            _run_profile_scheduler(config, profiles, deal_config.safety)
         except KeyboardInterrupt:
             logger.info("Остановлено пользователем")
     else:
