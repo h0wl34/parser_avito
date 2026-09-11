@@ -31,6 +31,40 @@ DEFAULT_GPU_THRESHOLDS = {
 
 
 @dataclass(slots=True)
+class SafetyConfig:
+    """Conservative operating limits for the watcher.
+
+    These controls are intended to reduce request volume and stop cleanly when
+    Avito rejects traffic. They are not an anti-bot bypass mechanism.
+    """
+
+    enabled: bool = True
+    require_anonymous: bool = True
+    disable_enrichment_requests: bool = True
+    stop_on_block: bool = True
+    min_profile_interval_seconds: int = 300
+    max_requests_per_hour: int = 120
+    interval_jitter_ratio: float = 0.25
+    startup_spread_seconds: int = 180
+    cooldown_after_block_seconds: int = 21_600
+    block_statuses: tuple[int, ...] = (403, 429, 439)
+
+    def validate(self) -> None:
+        if self.min_profile_interval_seconds < 30:
+            raise ValueError("min_profile_interval_seconds must be >= 30")
+        if self.max_requests_per_hour < 1:
+            raise ValueError("max_requests_per_hour must be >= 1")
+        if not 0 <= self.interval_jitter_ratio <= 0.75:
+            raise ValueError("interval_jitter_ratio must be between 0 and 0.75")
+        if self.startup_spread_seconds < 0:
+            raise ValueError("startup_spread_seconds must be >= 0")
+        if self.cooldown_after_block_seconds < 300:
+            raise ValueError("cooldown_after_block_seconds must be >= 300")
+        if not self.block_statuses:
+            raise ValueError("block_statuses must not be empty")
+
+
+@dataclass(slots=True)
 class DealWatcherConfig:
     enabled: bool = False
     notify_score: int = 80
@@ -39,6 +73,7 @@ class DealWatcherConfig:
     database_path: str = "database.db"
     series_bonus: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SERIES_BONUS))
     gpu_thresholds: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_GPU_THRESHOLDS))
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
 
 
 def load_deal_watcher_config(path: str | Path = "deal_watcher.toml") -> DealWatcherConfig:
@@ -65,5 +100,33 @@ def load_deal_watcher_config(path: str | Path = "deal_watcher.toml") -> DealWatc
     thresholds = raw.get("gpu_thresholds", {})
     if isinstance(thresholds, dict):
         config.gpu_thresholds.update({str(k): int(v) for k, v in thresholds.items()})
+
+    safety = raw.get("safety", {})
+    if isinstance(safety, dict):
+        raw_statuses = safety.get("block_statuses", config.safety.block_statuses)
+        statuses = tuple(int(value) for value in raw_statuses)
+        config.safety = SafetyConfig(
+            enabled=bool(safety.get("enabled", True)),
+            require_anonymous=bool(safety.get("require_anonymous", True)),
+            disable_enrichment_requests=bool(
+                safety.get("disable_enrichment_requests", True)
+            ),
+            stop_on_block=bool(safety.get("stop_on_block", True)),
+            min_profile_interval_seconds=int(
+                safety.get("min_profile_interval_seconds", 300)
+            ),
+            max_requests_per_hour=int(safety.get("max_requests_per_hour", 120)),
+            interval_jitter_ratio=float(
+                safety.get("interval_jitter_ratio", 0.25)
+            ),
+            startup_spread_seconds=int(
+                safety.get("startup_spread_seconds", 180)
+            ),
+            cooldown_after_block_seconds=int(
+                safety.get("cooldown_after_block_seconds", 21_600)
+            ),
+            block_statuses=statuses,
+        )
+        config.safety.validate()
 
     return config
