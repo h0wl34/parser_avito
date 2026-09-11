@@ -5,6 +5,18 @@ market_window_days = 30
 min_market_samples = 5
 database_path = "database.db"
 
+[safety]
+enabled = true
+require_anonymous = true
+disable_enrichment_requests = true
+stop_on_block = true
+min_profile_interval_seconds = 300
+max_requests_per_hour = 120
+interval_jitter_ratio = 0.25
+startup_spread_seconds = 180
+cooldown_after_block_seconds = 21600
+block_statuses = [403, 429, 439]
+
 [series_bonus]
 "ThinkBook 16+" = 15
 "ThinkBook 16p" = 15
