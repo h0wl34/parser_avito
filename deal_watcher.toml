@@ -1,5 +1,5 @@
 [deal_watcher]
-enabled = false
+enabled = true
 notify_score = 80
 market_window_days = 30
 min_market_samples = 5
