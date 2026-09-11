@@ -20,7 +20,7 @@ jobs:
 
       - name: Compile watcher modules
         run: |
-          python -m py_compile deal_watcher/*.py deal_watcher_runner.py tests/test_deal_watcher.py
+          python -m py_compile deal_watcher/*.py deal_watcher_runner.py parser/http/client.py tests/*.py
 
       - name: Run unit tests
         env:
