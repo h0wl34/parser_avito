@@ -148,6 +148,7 @@ class Item(BaseModel):
     total_views: int | None = None
     today_views: int | None = None
     phone: str | None = None
+    dealAnalysis: Any | None = None
 
 
 class ItemsResponse(BaseModel):
