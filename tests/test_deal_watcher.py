@@ -8,6 +8,7 @@ from deal_watcher.config import DealWatcherConfig
 from deal_watcher.models import Condition, LaptopSpecs, MarketStats
 from deal_watcher.normalizer import assess_risk, extract_specs
 from deal_watcher.scoring import analyze_deal
+from deal_watcher.search_profiles import load_search_profiles
 from deal_watcher.storage import DealWatcherStore
 
 
@@ -94,6 +95,54 @@ class ScoringTests(unittest.TestCase):
         self.assertLess(analysis.score, 50)
 
 
+class SearchProfileTests(unittest.TestCase):
+    def test_load_fast_and_market_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "deal_searches.toml"
+            path.write_text(
+                """
+[[search]]
+name = "market-4070"
+url = "https://www.avito.ru/moskva/noutbuki?q=rtx+4070"
+mode = "market"
+interval_seconds = 21600
+pages = 5
+
+[[search]]
+name = "fast-bagration"
+url = "https://www.avito.ru/moskva/noutbuki?q=rtx+4070"
+mode = "fast"
+interval_seconds = 180
+pages = 1
+""",
+                encoding="utf-8",
+            )
+            profiles = load_search_profiles(path)
+            self.assertEqual(
+                [p.name for p in profiles],
+                ["market-4070", "fast-bagration"],
+            )
+            self.assertFalse(profiles[0].notify)
+            self.assertTrue(profiles[1].notify)
+
+    def test_duplicate_profile_names_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "deal_searches.toml"
+            path.write_text(
+                """
+[[search]]
+name = "same"
+url = "https://www.avito.ru/moskva/noutbuki"
+[[search]]
+name = "same"
+url = "https://www.avito.ru/moskva/noutbuki"
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                load_search_profiles(path)
+
+
 class StorageTests(unittest.TestCase):
     def test_market_fallback_and_price_drop(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,10 +182,17 @@ class StorageTests(unittest.TestCase):
             )
             self.assertAlmostEqual(drop, 10.0, places=1)
 
-            # Price history of one listing must not inflate market sample size.
             stats_after_drop = store.market_stats(specs, min_samples=5)
             self.assertEqual(stats_after_drop.sample_size, 6)
             self.assertEqual(stats_after_drop.median_price, 123_000)
+
+    def test_seen_state_is_scoped_by_profile_and_price(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DealWatcherStore(Path(tmp) / "test.db")
+            store.mark_seen("market", [(10, 100_000)])
+            self.assertTrue(store.is_seen("market", 10, 100_000))
+            self.assertFalse(store.is_seen("fast", 10, 100_000))
+            self.assertFalse(store.is_seen("market", 10, 95_000))
 
 
 if __name__ == "__main__":
