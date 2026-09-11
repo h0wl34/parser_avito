@@ -22,7 +22,14 @@ class SearchProfile:
     def validate(self) -> None:
         if not self.name.strip():
             raise ValueError("search profile name must not be empty")
-        if not self.url.startswith(("https://www.avito.ru/", "http://www.avito.ru/")):
+        if not self.url.startswith(
+            (
+                "https://www.avito.ru/",
+                "http://www.avito.ru/",
+                "https://avito.ru/",
+                "http://avito.ru/",
+            )
+        ):
             raise ValueError(f"{self.name}: expected an Avito URL")
         if self.mode not in {"fast", "market"}:
             raise ValueError(f"{self.name}: unsupported mode {self.mode!r}")
