@@ -1,0 +1,42 @@
+# Copy this file to deal_searches.toml and paste your real Avito search URLs.
+# Keep profile names stable: they are part of the per-profile deduplication key.
+
+# Wide MARKET searches silently build the price baseline.
+# They run first at startup and never send deal notifications.
+[[search]]
+name = "market-rtx4070-moscow"
+url = "https://www.avito.ru/moskva/noutbuki"
+mode = "market"
+interval_seconds = 21600
+pages = 5
+max_age_seconds = 2592000
+enabled = false
+
+[[search]]
+name = "market-rtx5060-moscow"
+url = "https://www.avito.ru/moskva/noutbuki"
+mode = "market"
+interval_seconds = 21600
+pages = 5
+max_age_seconds = 2592000
+enabled = false
+
+# FAST searches should be your exact Bagrationovskaya / Savyolovskaya URLs
+# with category, radius, query and price filters already encoded by Avito.
+[[search]]
+name = "fast-bagrationovskaya-4070"
+url = "https://www.avito.ru/moskva/noutbuki"
+mode = "fast"
+interval_seconds = 180
+pages = 1
+max_age_seconds = 3600
+enabled = false
+
+[[search]]
+name = "fast-savelovskaya-5060"
+url = "https://www.avito.ru/moskva/noutbuki"
+mode = "fast"
+interval_seconds = 180
+pages = 1
+max_age_seconds = 3600
+enabled = false
