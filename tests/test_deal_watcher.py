@@ -8,15 +8,14 @@ from deal_watcher.config import DealWatcherConfig
 from deal_watcher.models import Condition, LaptopSpecs, MarketStats
 from deal_watcher.normalizer import assess_risk, extract_specs
 from deal_watcher.scoring import analyze_deal
-from deal_watcher.search_profiles import load_search_profiles
 from deal_watcher.storage import DealWatcherStore
+from deal_watcher.search_profiles import load_search_profiles
 
 
 class NormalizerTests(unittest.TestCase):
     def test_tuf_listing(self):
         specs = extract_specs(
-            "ASUS TUF Gaming A15 FA507XI Ryzen 9 7940HS RTX 4070 "
-            "32/1TB Новый, не активирован"
+            "ASUS TUF Gaming A15 FA507XI Ryzen 9 7940HS RTX 4070 32/1TB Новый, не активирован"
         )
         self.assertEqual(specs.brand, "ASUS")
         self.assertEqual(specs.family, "TUF")
@@ -38,9 +37,7 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual(specs.condition, Condition.NEW_LIKELY)
 
     def test_bait_and_refurbished(self):
-        text = (
-            "RTX 4070 ноутбук 69990 цена при оформлении кредита, после ремонта"
-        )
+        text = "RTX 4070 ноутбук 69990 цена при оформлении кредита, после ремонта"
         risk = assess_risk(text)
         specs = extract_specs(text)
         self.assertGreaterEqual(risk.score, 40)
@@ -146,7 +143,8 @@ url = "https://www.avito.ru/moskva/noutbuki"
 class StorageTests(unittest.TestCase):
     def test_market_fallback_and_price_drop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = DealWatcherStore(Path(tmp) / "test.db")
+            db_path = Path(tmp) / "test.db"
+            store = DealWatcherStore(db_path)
             specs = LaptopSpecs(brand="ASUS", family="TUF", gpu="RTX 4070")
             for idx, price in enumerate(
                 [120_000, 122_000, 124_000, 126_000, 128_000], start=1
@@ -181,10 +179,59 @@ class StorageTests(unittest.TestCase):
                 specs=specs,
             )
             self.assertAlmostEqual(drop, 10.0, places=1)
-
             stats_after_drop = store.market_stats(specs, min_samples=5)
             self.assertEqual(stats_after_drop.sample_size, 6)
             self.assertEqual(stats_after_drop.median_price, 123_000)
+
+    def test_market_excludes_high_risk_and_used_prices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DealWatcherStore(Path(tmp) / "test.db")
+            clean = LaptopSpecs(
+                brand="ASUS",
+                family="TUF",
+                gpu="RTX 4070",
+                condition=Condition.NEW_LIKELY,
+            )
+            used = LaptopSpecs(
+                brand="ASUS",
+                family="TUF",
+                gpu="RTX 4070",
+                condition=Condition.USED,
+            )
+            for idx, price in enumerate(
+                [120_000, 122_000, 124_000, 126_000, 128_000], start=1
+            ):
+                store.record_listing(
+                    avito_id=idx,
+                    title=f"clean {idx}",
+                    seller_id=None,
+                    url=None,
+                    price=price,
+                    specs=clean,
+                    risk_score=0,
+                )
+            store.record_listing(
+                avito_id=90,
+                title="credit bait",
+                seller_id=None,
+                url=None,
+                price=60_000,
+                specs=clean,
+                risk_score=30,
+            )
+            store.record_listing(
+                avito_id=91,
+                title="used",
+                seller_id=None,
+                url=None,
+                price=70_000,
+                specs=used,
+                risk_score=0,
+            )
+
+            stats = store.market_stats(clean, min_samples=5)
+            self.assertEqual(stats.sample_size, 5)
+            self.assertEqual(stats.median_price, 124_000)
 
     def test_seen_state_is_scoped_by_profile_and_price(self):
         with tempfile.TemporaryDirectory() as tmp:
