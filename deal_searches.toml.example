@@ -1,5 +1,6 @@
 # Copy this file to deal_searches.toml and paste your real Avito search URLs.
 # Keep profile names stable: they are part of the per-profile deduplication key.
+# SAFE MODE adds jitter around these intervals and enforces the global floor.
 
 # Wide MARKET searches silently build the price baseline.
 # They run first at startup and never send deal notifications.
@@ -7,8 +8,8 @@
 name = "market-rtx4070-moscow"
 url = "https://www.avito.ru/moskva/noutbuki"
 mode = "market"
-interval_seconds = 21600
-pages = 5
+interval_seconds = 43200
+pages = 3
 max_age_seconds = 2592000
 enabled = false
 
@@ -16,18 +17,20 @@ enabled = false
 name = "market-rtx5060-moscow"
 url = "https://www.avito.ru/moskva/noutbuki"
 mode = "market"
-interval_seconds = 21600
-pages = 5
+interval_seconds = 43200
+pages = 3
 max_age_seconds = 2592000
 enabled = false
 
 # FAST searches should be your exact Bagrationovskaya / Savyolovskaya URLs
 # with category, radius, query and price filters already encoded by Avito.
+# 600 seconds means a nominal 10-minute interval; SAFE MODE with 25% jitter
+# produces roughly 7.5–12.5 minutes between runs.
 [[search]]
 name = "fast-bagrationovskaya-4070"
 url = "https://www.avito.ru/moskva/noutbuki"
 mode = "fast"
-interval_seconds = 180
+interval_seconds = 600
 pages = 1
 max_age_seconds = 3600
 enabled = false
@@ -36,7 +39,7 @@ enabled = false
 name = "fast-savelovskaya-5060"
 url = "https://www.avito.ru/moskva/noutbuki"
 mode = "fast"
-interval_seconds = 180
+interval_seconds = 600
 pages = 1
 max_age_seconds = 3600
 enabled = false
