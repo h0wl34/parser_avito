@@ -3,6 +3,7 @@
 config.toml
 config_backup.toml
 config.local.toml
+deal_searches.toml
 .env
 .env.*
 !.env.example
