@@ -19,6 +19,7 @@ class DealWatcherService:
         self,
         ad: Any,
         source_url: str | None = None,
+        baseline_eligible: bool = False,
     ) -> DealAnalysis | None:
         price_detailed = getattr(ad, "priceDetailed", None)
         price = getattr(price_detailed, "value", None)
@@ -48,6 +49,7 @@ class DealWatcherService:
             specs=specs,
             risk_score=risk.score,
             source_url=source_url,
+            baseline_eligible=baseline_eligible,
             published_at=published_at,
         )
         market = self.store.market_stats(
