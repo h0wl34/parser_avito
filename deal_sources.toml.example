@@ -2,16 +2,32 @@
 # These sources feed listing events into scoring without polling Avito.
 
 [jsonl]
-# Generic integration point. Any authorized/external source may append one JSON
-# object per line to this file. The runner tails it and deduplicates by profile,
-# listing id and price.
+# Durable integration spool. deal_feed_runner.py tails this file and deduplicates
+# by profile, listing id and price.
 enabled = true
 path = "deal_feed.jsonl"
 poll_seconds = 2
 start_at_end = false
 
+[webhook]
+# Optional high-speed ingress for Avigram's documented callback API.
+# Keep this bound to localhost and expose it through your normal TLS reverse
+# proxy. The callback secret is read from AVIGRAM_CALLBACK_SECRET, not TOML.
+enabled = false
+provider = "avigram"
+bind_host = "127.0.0.1"
+port = 8765
+path = "/avigram-callback"
+require_signature = true
+secret_env = "AVIGRAM_CALLBACK_SECRET"
+max_skew_seconds = 300
+max_body_bytes = 1048576
+# Name Avigram searches like fast-any-4070 / market-new-4070. Searches whose
+# name begins with one of these prefixes become silent MARKET baseline events.
+market_name_prefixes = ["market-", "market_", "market "]
+
 [imap]
-# Optional: ingest listing links from saved-search notification emails.
+# Optional fallback: ingest listing links from saved-search notification emails.
 # Credentials are NEVER stored here; set the named environment variables.
 enabled = false
 host = "imap.example.com"
@@ -25,7 +41,7 @@ profile = "imap-fast"
 mode = "fast"
 mark_seen = true
 
-# JSONL event format:
+# Generic JSONL event format:
 # {"id": 1234567890, "title": "Lenovo Legion RTX 4070", "price": 99000,
 #  "url": "https://www.avito.ru/moskva/noutbuki/..._1234567890",
 #  "description": "optional", "profile": "fast-any-4070", "mode": "fast",
