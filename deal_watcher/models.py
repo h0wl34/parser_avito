@@ -8,6 +8,7 @@ from typing import Any
 class Condition(StrEnum):
     NEW_CONFIRMED = "NEW_CONFIRMED"
     NEW_LIKELY = "NEW_LIKELY"
+    LIKE_NEW = "LIKE_NEW"
     UNKNOWN = "UNKNOWN"
     USED = "USED"
     REFURBISHED = "REFURBISHED"
