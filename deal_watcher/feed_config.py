@@ -51,9 +51,42 @@ class JsonlFeedConfig:
 
 
 @dataclass(slots=True)
+class WebhookIngressConfig:
+    """Local durable ingress for a documented third-party listing webhook."""
+
+    enabled: bool = False
+    provider: str = "avigram"
+    bind_host: str = "127.0.0.1"
+    port: int = 8765
+    path: str = "/avigram-callback"
+    require_signature: bool = True
+    secret_env: str = "AVIGRAM_CALLBACK_SECRET"
+    max_skew_seconds: int = 300
+    max_body_bytes: int = 1_048_576
+    market_name_prefixes: tuple[str, ...] = ("market-", "market_", "market ")
+
+    def validate(self) -> None:
+        if not self.enabled:
+            return
+        if self.provider != "avigram":
+            raise ValueError("webhook.provider currently supports only 'avigram'")
+        if self.port < 1 or self.port > 65535:
+            raise ValueError("webhook.port must be between 1 and 65535")
+        if not self.path.startswith("/"):
+            raise ValueError("webhook.path must start with '/'")
+        if self.require_signature and not self.secret_env.strip():
+            raise ValueError("webhook.secret_env is required when signature is required")
+        if self.max_skew_seconds < 30 or self.max_skew_seconds > 3600:
+            raise ValueError("webhook.max_skew_seconds must be between 30 and 3600")
+        if self.max_body_bytes < 1024:
+            raise ValueError("webhook.max_body_bytes must be >= 1024")
+
+
+@dataclass(slots=True)
 class FeedSourcesConfig:
     imap: ImapFeedConfig = field(default_factory=ImapFeedConfig)
     jsonl: JsonlFeedConfig = field(default_factory=JsonlFeedConfig)
+    webhook: WebhookIngressConfig = field(default_factory=WebhookIngressConfig)
 
     @property
     def has_enabled_source(self) -> bool:
@@ -62,8 +95,11 @@ class FeedSourcesConfig:
     def validate(self) -> None:
         self.imap.validate()
         self.jsonl.validate()
+        self.webhook.validate()
         if not self.has_enabled_source:
             raise ValueError("at least one feed source must be enabled")
+        if self.webhook.enabled and not self.jsonl.enabled:
+            raise ValueError("webhook ingress requires jsonl.enabled=true for durable spooling")
 
 
 def load_feed_sources_config(
@@ -80,6 +116,11 @@ def load_feed_sources_config(
 
     imap_raw = raw.get("imap", {})
     jsonl_raw = raw.get("jsonl", {})
+    webhook_raw = raw.get("webhook", {})
+    prefixes = webhook_raw.get(
+        "market_name_prefixes",
+        ["market-", "market_", "market "],
+    )
     config = FeedSourcesConfig(
         imap=ImapFeedConfig(
             enabled=bool(imap_raw.get("enabled", False)),
@@ -99,6 +140,20 @@ def load_feed_sources_config(
             path=str(jsonl_raw.get("path", "deal_feed.jsonl")),
             poll_seconds=int(jsonl_raw.get("poll_seconds", 2)),
             start_at_end=bool(jsonl_raw.get("start_at_end", False)),
+        ),
+        webhook=WebhookIngressConfig(
+            enabled=bool(webhook_raw.get("enabled", False)),
+            provider=str(webhook_raw.get("provider", "avigram")).lower(),
+            bind_host=str(webhook_raw.get("bind_host", "127.0.0.1")),
+            port=int(webhook_raw.get("port", 8765)),
+            path=str(webhook_raw.get("path", "/avigram-callback")),
+            require_signature=bool(webhook_raw.get("require_signature", True)),
+            secret_env=str(
+                webhook_raw.get("secret_env", "AVIGRAM_CALLBACK_SECRET")
+            ),
+            max_skew_seconds=int(webhook_raw.get("max_skew_seconds", 300)),
+            max_body_bytes=int(webhook_raw.get("max_body_bytes", 1_048_576)),
+            market_name_prefixes=tuple(str(v).lower() for v in prefixes),
         ),
     )
     config.validate()
