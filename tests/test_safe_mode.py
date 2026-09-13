@@ -8,7 +8,9 @@ from unittest.mock import patch
 from deal_watcher.config import SafetyConfig, load_deal_watcher_config
 from deal_watcher.safety import (
     HourlyRequestBudget,
+    PersistentBlockCircuit,
     jittered_interval,
+    validate_direct_runtime,
     validate_safe_runtime,
 )
 from deal_watcher.search_profiles import SearchProfile
@@ -35,17 +37,21 @@ enabled = true
 enabled = true
 require_anonymous = true
 stop_on_block = true
+allow_direct_avito_requests = false
 min_profile_interval_seconds = 600
 max_requests_per_hour = 90
 interval_jitter_ratio = 0.20
 startup_spread_seconds = 120
 cooldown_after_block_seconds = 14400
+max_cooldown_after_block_seconds = 86400
+block_backoff_multiplier = 2.0
 block_statuses = [403, 429]
 """,
                 encoding="utf-8",
             )
             config = load_deal_watcher_config(path)
             self.assertTrue(config.safety.enabled)
+            self.assertFalse(config.safety.allow_direct_avito_requests)
             self.assertEqual(config.safety.min_profile_interval_seconds, 600)
             self.assertEqual(config.safety.max_requests_per_hour, 90)
             self.assertEqual(config.safety.block_statuses, (403, 429))
@@ -61,6 +67,15 @@ block_statuses = [403, 429]
         config.parse_views = True
         with self.assertRaisesRegex(ValueError, "parse_views"):
             validate_safe_runtime(config, SafetyConfig())
+
+    def test_direct_source_is_opt_in(self):
+        config = DummyConfig()
+        with self.assertRaisesRegex(ValueError, "blocks direct Avito polling"):
+            validate_direct_runtime(config, SafetyConfig())
+        validate_direct_runtime(
+            config,
+            SafetyConfig(allow_direct_avito_requests=True),
+        )
 
 
 class SchedulerSafetyTests(unittest.TestCase):
@@ -97,6 +112,26 @@ class SchedulerSafetyTests(unittest.TestCase):
         )
         with patch("deal_watcher.safety.random.uniform", return_value=250.0):
             self.assertEqual(jittered_interval(too_fast, safety), 300.0)
+
+    def test_persistent_block_circuit_survives_recreation_and_backs_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "state.db")
+            safety = SafetyConfig(
+                cooldown_after_block_seconds=3600,
+                max_cooldown_after_block_seconds=14400,
+                block_backoff_multiplier=2.0,
+            )
+            first = PersistentBlockCircuit(db_path)
+            self.assertEqual(first.record_block(safety, now=1000.0), 3600.0)
+            self.assertAlmostEqual(first.seconds_remaining(now=1001.0), 3599.0)
+
+            recreated = PersistentBlockCircuit(db_path)
+            self.assertAlmostEqual(recreated.seconds_remaining(now=1001.0), 3599.0)
+            self.assertEqual(recreated.record_block(safety, now=5000.0), 7200.0)
+            self.assertAlmostEqual(recreated.seconds_remaining(now=5001.0), 7199.0)
+
+            recreated.record_success(now=13000.0)
+            self.assertEqual(recreated.seconds_remaining(now=13000.0), 0.0)
 
 
 if __name__ == "__main__":
