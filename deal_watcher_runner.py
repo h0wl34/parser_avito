@@ -113,12 +113,14 @@ class LaptopDealAvitoParse(AvitoParse):
         notify_ads = []
         processed_ads = []
         source_url = self.profile.url if self.profile else None
+        baseline_eligible = bool(self.profile and self.profile.mode == "market")
 
         for ad in filtered_ads:
             try:
                 analysis = self.deal_watcher.analyze_item(
                     ad,
                     source_url=source_url,
+                    baseline_eligible=baseline_eligible,
                 )
                 if analysis is None:
                     if not self.profile or self.profile.notify:
