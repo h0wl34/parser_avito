@@ -83,6 +83,9 @@ _USED = (
     "бывший в употреблении",
     "пользовался",
     "пользовались",
+    "пользовалась",
+    "использовался",
+    "использовалась",
     "есть следы использования",
 )
 _NEW_STRONG = (
@@ -93,12 +96,34 @@ _NEW_STRONG = (
     "не вскрыт",
 )
 _NEW_WEAK = ("новый", "new", "полный комплект", "гарантия")
+_LIKE_NEW_PHRASES = (
+    "не пользовался",
+    "не пользовалась",
+    "не пользовались",
+    "не использовался",
+    "не использовалась",
+    "не использовали",
+    "не подошёл",
+    "не подошел",
+    "не понравился",
+    "распакован для проверки",
+    "распаковали для проверки",
+    "открыт только для проверки",
+    "открывали только для проверки",
+)
+_LIKE_NEW_PATTERNS = (
+    re.compile(r"(?:пользовал(?:ся|ась|ись)?|использовал(?:ся|ась|ись)?)\s+(?:пару|несколько|\d+)\s+(?:дней|дня|часов|раз)", re.I),
+    re.compile(r"куплен(?:а|о)?\s+(?:\d+\s+)?(?:дн(?:я|ей)|недел(?:ю|и))\s+назад", re.I),
+    re.compile(r"\b(?:1|2|3)\s+цикл(?:а|ов)?\s+(?:батареи|аккумулятора)", re.I),
+    re.compile(r"(?:ssd|диск)\D{0,20}(?:\d|[12]\d|3\d)\s*(?:ч|час|часа|часов)\b", re.I),
+)
 
 _RISK_TERMS: list[tuple[str, int, str]] = [
     ("trade-in", 18, "trade-in"),
     ("trade in", 18, "trade-in"),
     ("трейд-ин", 18, "trade-in"),
     ("цена от", 14, "цена «от»"),
+    ("цены от", 20, "цены «от» / витрина"),
     ("уточняйте цену", 16, "цена требует уточнения"),
     ("уточняйте стоимость", 16, "цена требует уточнения"),
     ("при оформлении кредита", 24, "цена при кредите"),
@@ -107,6 +132,16 @@ _RISK_TERMS: list[tuple[str, int, str]] = [
     ("под заказ", 12, "под заказ"),
     ("предоплата", 18, "предоплата"),
     ("цена указана за", 30, "цена может быть не за ноутбук"),
+    ("цена без памяти", 30, "неполная комплектация"),
+    ("без озу", 30, "без ОЗУ"),
+    ("без оперативной памяти", 30, "без ОЗУ"),
+    ("без ssd", 30, "без SSD"),
+    ("без ссд", 30, "без SSD"),
+    ("без диска", 30, "без SSD/диска"),
+    ("ноутбуки в ассортименте", 35, "витрина/ассортимент"),
+    ("ноутбуки с гарантией в ассортименте", 35, "витрина/ассортимент"),
+    ("в наличии ноутбуки разных", 30, "витрина/ассортимент"),
+    ("разные модели ноутбуков", 30, "витрина/ассортимент"),
     ("без видеокарты", 50, "без видеокарты"),
     ("на запчасти", 50, "на запчасти"),
     ("не включается", 50, "не включается"),
@@ -191,14 +226,23 @@ def detect_condition(text: str) -> Condition:
         return Condition.BROKEN
     if any(term in lower for term in _REFURB):
         return Condition.REFURBISHED
-    if any(term in lower for term in _USED):
-        return Condition.USED
 
     strong = sum(term in lower for term in _NEW_STRONG)
     weak = sum(term in lower for term in _NEW_WEAK)
     if strong >= 1 and weak >= 1:
         return Condition.NEW_CONFIRMED
-    if strong >= 1 or weak >= 1:
+    if strong >= 1:
+        return Condition.NEW_LIKELY
+
+    like_new = any(term in lower for term in _LIKE_NEW_PHRASES) or any(
+        pattern.search(text) for pattern in _LIKE_NEW_PATTERNS
+    )
+    if like_new:
+        return Condition.NEW_LIKELY if weak >= 1 else Condition.LIKE_NEW
+
+    if any(term in lower for term in _USED):
+        return Condition.USED
+    if weak >= 1:
         return Condition.NEW_LIKELY
     return Condition.UNKNOWN
 
