@@ -229,10 +229,12 @@ def _run_profile_scheduler(
     }
     effective_profiles = [parsers[p.name].profile for p in profiles]
 
+    run_once = bool(base_config.one_time_start)
+    completed_once: set[str] = set()
     start = time.monotonic()
     next_run: dict[str, float] = {}
     for index, profile in enumerate(effective_profiles):
-        if not safety.enabled:
+        if run_once or not safety.enabled:
             next_run[profile.name] = 0.0
             continue
 
@@ -254,6 +256,8 @@ def _run_profile_scheduler(
         global_block = False
 
         for profile in effective_profiles:
+            if run_once and profile.name in completed_once:
+                continue
             if now < next_run[profile.name]:
                 continue
 
@@ -279,13 +283,23 @@ def _run_profile_scheduler(
             )
             try:
                 parsers[profile.name].parse()
-                delay = jittered_interval(profile, safety)
-                next_run[profile.name] = time.monotonic() + delay
-                logger.info(
-                    "Следующий запуск profile={} примерно через {:.0f} сек.",
-                    profile.name,
-                    delay,
-                )
+                if run_once:
+                    completed_once.add(profile.name)
+                    next_run[profile.name] = float("inf")
+                    logger.info(
+                        "Одноразовый тест profile={} завершён ({}/{})",
+                        profile.name,
+                        len(completed_once),
+                        len(effective_profiles),
+                    )
+                else:
+                    delay = jittered_interval(profile, safety)
+                    next_run[profile.name] = time.monotonic() + delay
+                    logger.info(
+                        "Следующий запуск profile={} примерно через {:.0f} сек.",
+                        profile.name,
+                        delay,
+                    )
             except BlockedAccessError as err:
                 logger.error(
                     "SAFE MODE: HTTP {} для profile={}; все профили уходят в cooldown.",
@@ -316,7 +330,7 @@ def _run_profile_scheduler(
                     retry_in,
                 )
 
-        if base_config.one_time_start:
+        if run_once and len(completed_once) == len(effective_profiles):
             logger.info("Все поисковые профили обработаны один раз")
             return
 
