@@ -61,8 +61,7 @@ class NormalizerTests(unittest.TestCase):
             "HP Omen RTX 5060. Цена за ноутбук без ОЗУ и SSD, память ставим отдельно."
         )
         self.assertGreaterEqual(risk.score, 50)
-        self.assertIn("без ОЗУ", risk.flags)
-        self.assertIn("без SSD", risk.flags)
+        self.assertIn("без ОЗУ/SSD", risk.flags)
 
     def test_catalog_listing_is_high_risk(self):
         risk = assess_risk(
