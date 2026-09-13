@@ -34,24 +34,27 @@ DEFAULT_GPU_THRESHOLDS = {
 class SafetyConfig:
     """Conservative operating limits for the watcher.
 
-    These controls are intended to reduce request volume and stop cleanly when
-    Avito rejects traffic. They are not an anti-bot bypass mechanism.
+    SAFE mode is feed-first. Direct Avito polling is explicitly opt-in and is
+    treated as a legacy diagnostic source, not as an anti-bot bypass path.
     """
 
     enabled: bool = True
     require_anonymous: bool = True
     disable_enrichment_requests: bool = True
     stop_on_block: bool = True
-    min_profile_interval_seconds: int = 300
-    max_requests_per_hour: int = 120
-    interval_jitter_ratio: float = 0.25
-    startup_spread_seconds: int = 180
-    cooldown_after_block_seconds: int = 21_600
+    allow_direct_avito_requests: bool = False
+    min_profile_interval_seconds: int = 900
+    max_requests_per_hour: int = 12
+    interval_jitter_ratio: float = 0.20
+    startup_spread_seconds: int = 900
+    cooldown_after_block_seconds: int = 86_400
+    max_cooldown_after_block_seconds: int = 604_800
+    block_backoff_multiplier: float = 2.0
     block_statuses: tuple[int, ...] = (403, 429, 439)
 
     def validate(self) -> None:
-        if self.min_profile_interval_seconds < 30:
-            raise ValueError("min_profile_interval_seconds must be >= 30")
+        if self.min_profile_interval_seconds < 60:
+            raise ValueError("min_profile_interval_seconds must be >= 60")
         if self.max_requests_per_hour < 1:
             raise ValueError("max_requests_per_hour must be >= 1")
         if not 0 <= self.interval_jitter_ratio <= 0.75:
@@ -60,6 +63,12 @@ class SafetyConfig:
             raise ValueError("startup_spread_seconds must be >= 0")
         if self.cooldown_after_block_seconds < 300:
             raise ValueError("cooldown_after_block_seconds must be >= 300")
+        if self.max_cooldown_after_block_seconds < self.cooldown_after_block_seconds:
+            raise ValueError(
+                "max_cooldown_after_block_seconds must be >= cooldown_after_block_seconds"
+            )
+        if self.block_backoff_multiplier < 1.0:
+            raise ValueError("block_backoff_multiplier must be >= 1.0")
         if not self.block_statuses:
             raise ValueError("block_statuses must not be empty")
 
@@ -112,18 +121,27 @@ def load_deal_watcher_config(path: str | Path = "deal_watcher.toml") -> DealWatc
                 safety.get("disable_enrichment_requests", True)
             ),
             stop_on_block=bool(safety.get("stop_on_block", True)),
-            min_profile_interval_seconds=int(
-                safety.get("min_profile_interval_seconds", 300)
+            allow_direct_avito_requests=bool(
+                safety.get("allow_direct_avito_requests", False)
             ),
-            max_requests_per_hour=int(safety.get("max_requests_per_hour", 120)),
+            min_profile_interval_seconds=int(
+                safety.get("min_profile_interval_seconds", 900)
+            ),
+            max_requests_per_hour=int(safety.get("max_requests_per_hour", 12)),
             interval_jitter_ratio=float(
-                safety.get("interval_jitter_ratio", 0.25)
+                safety.get("interval_jitter_ratio", 0.20)
             ),
             startup_spread_seconds=int(
-                safety.get("startup_spread_seconds", 180)
+                safety.get("startup_spread_seconds", 900)
             ),
             cooldown_after_block_seconds=int(
-                safety.get("cooldown_after_block_seconds", 21_600)
+                safety.get("cooldown_after_block_seconds", 86_400)
+            ),
+            max_cooldown_after_block_seconds=int(
+                safety.get("max_cooldown_after_block_seconds", 604_800)
+            ),
+            block_backoff_multiplier=float(
+                safety.get("block_backoff_multiplier", 2.0)
             ),
             block_statuses=statuses,
         )
