@@ -235,7 +235,7 @@ class DealWatcherStore:
                       WHERE dp2.avito_id = dp.avito_id
                   )
                   AND dl.risk_score <= 10
-                  AND dl.condition NOT IN ('USED', 'REFURBISHED', 'BROKEN')
+                  AND dl.condition NOT IN ('LIKE_NEW', 'USED', 'REFURBISHED', 'BROKEN')
                   AND {where}
             """
             args: list[object] = [cutoff, *params]
