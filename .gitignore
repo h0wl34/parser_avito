@@ -4,6 +4,7 @@ config.toml
 config_backup.toml
 config.local.toml
 deal_searches.toml
+deal_sources.toml
 .env
 .env.*
 !.env.example
@@ -38,6 +39,8 @@ cookies.json
 *.sqlite
 *.sqlite3
 *.db
+deal_feed.jsonl
+*.deal-feed.jsonl
 
 # Logs and generated results
 logs/
