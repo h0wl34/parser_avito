@@ -44,6 +44,33 @@ class NormalizerTests(unittest.TestCase):
         self.assertIn("цена при кредите", risk.flags)
         self.assertEqual(specs.condition, Condition.REFURBISHED)
 
+    def test_like_new_beats_used_substring(self):
+        specs = extract_specs(
+            "Lenovo Legion RTX 4070. Куплен неделю назад, не пользовался, не подошёл."
+        )
+        self.assertEqual(specs.condition, Condition.LIKE_NEW)
+
+    def test_ideal_condition_alone_does_not_mean_like_new(self):
+        specs = extract_specs(
+            "ASUS RTX 4070 в идеальном состоянии, пользовался два года аккуратно"
+        )
+        self.assertEqual(specs.condition, Condition.USED)
+
+    def test_incomplete_barebone_is_high_risk(self):
+        risk = assess_risk(
+            "HP Omen RTX 5060. Цена за ноутбук без ОЗУ и SSD, память ставим отдельно."
+        )
+        self.assertGreaterEqual(risk.score, 50)
+        self.assertIn("без ОЗУ", risk.flags)
+        self.assertIn("без SSD", risk.flags)
+
+    def test_catalog_listing_is_high_risk(self):
+        risk = assess_risk(
+            "Ноутбуки с гарантией в ассортименте, в наличии ноутбуки разных моделей, цены от 25000"
+        )
+        self.assertGreaterEqual(risk.score, 30)
+        self.assertIn("витрина/ассортимент", risk.flags)
+
 
 class ScoringTests(unittest.TestCase):
     def test_anomalous_tuf_scores_high(self):
@@ -73,6 +100,26 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertGreaterEqual(analysis.score, 90)
         self.assertEqual(analysis.label, "IMMEDIATE")
+
+    def test_like_new_gets_positive_condition_credit(self):
+        config = DealWatcherConfig()
+        specs = LaptopSpecs(
+            brand="Lenovo",
+            family="Legion 5",
+            gpu="RTX 4070",
+            ram_gb=32,
+            storage_gb=1024,
+            condition=Condition.LIKE_NEW,
+        )
+        analysis = analyze_deal(
+            price=95_000,
+            specs=specs,
+            risk=assess_risk("не пользовался, куплен неделю назад"),
+            market=MarketStats(median_price=125_000, sample_size=10, comparison_level="family_gpu"),
+            config=config,
+        )
+        self.assertGreaterEqual(analysis.score, 80)
+        self.assertIn("почти новый: минимальное использование", analysis.reasons)
 
     def test_bad_series_and_risk_are_penalized(self):
         config = DealWatcherConfig()
@@ -183,7 +230,7 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(stats_after_drop.sample_size, 6)
             self.assertEqual(stats_after_drop.median_price, 123_000)
 
-    def test_market_excludes_high_risk_and_used_prices(self):
+    def test_market_excludes_high_risk_used_and_like_new_prices(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = DealWatcherStore(Path(tmp) / "test.db")
             clean = LaptopSpecs(
@@ -197,6 +244,12 @@ class StorageTests(unittest.TestCase):
                 family="TUF",
                 gpu="RTX 4070",
                 condition=Condition.USED,
+            )
+            like_new = LaptopSpecs(
+                brand="ASUS",
+                family="TUF",
+                gpu="RTX 4070",
+                condition=Condition.LIKE_NEW,
             )
             for idx, price in enumerate(
                 [120_000, 122_000, 124_000, 126_000, 128_000], start=1
@@ -226,6 +279,15 @@ class StorageTests(unittest.TestCase):
                 url=None,
                 price=70_000,
                 specs=used,
+                risk_score=0,
+            )
+            store.record_listing(
+                avito_id=92,
+                title="like new",
+                seller_id=None,
+                url=None,
+                price=80_000,
+                specs=like_new,
                 risk_score=0,
             )
 
