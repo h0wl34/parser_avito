@@ -4,8 +4,13 @@ from .config import DealWatcherConfig
 from .models import Condition, DealAnalysis, LaptopSpecs, MarketStats, RiskAssessment
 
 _CONDITION_POINTS = {
-    Condition.NEW_CONFIRMED: 10, Condition.NEW_LIKELY: 7, Condition.UNKNOWN: 2,
-    Condition.USED: -8, Condition.REFURBISHED: -18, Condition.BROKEN: -40,
+    Condition.NEW_CONFIRMED: 10,
+    Condition.NEW_LIKELY: 7,
+    Condition.LIKE_NEW: 4,
+    Condition.UNKNOWN: 2,
+    Condition.USED: -8,
+    Condition.REFURBISHED: -18,
+    Condition.BROKEN: -40,
 }
 
 
@@ -68,6 +73,7 @@ def analyze_deal(*, price: int, specs: LaptopSpecs, risk: RiskAssessment, market
     if discount_pct is not None: reasons.append(f"{discount_pct:+.1f}% к медиане рынка")
     if threshold: reasons.append(f"ориентир {specs.gpu}: {threshold:,} ₽".replace(",", " "))
     if series_points: reasons.append(f"серия {specs.family}: {series_points:+d}")
+    if specs.condition == Condition.LIKE_NEW: reasons.append("почти новый: минимальное использование")
     if risk.flags: reasons.append("риски: " + ", ".join(risk.flags))
     if price_drop_pct: reasons.append(f"снижение цены: {price_drop_pct:.1f}%")
     return DealAnalysis(score=score, label=label_for_score(score), specs=specs, risk=risk, market=market, price=price, discount_pct=discount_pct, absolute_threshold=threshold, reasons=reasons, price_drop_pct=price_drop_pct)
