@@ -47,7 +47,8 @@ class DealWatcherStore:
                     storage_gb INTEGER,
                     condition TEXT,
                     risk_score INTEGER NOT NULL DEFAULT 0,
-                    source_url TEXT
+                    source_url TEXT,
+                    baseline_eligible INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS deal_prices (
@@ -73,12 +74,20 @@ class DealWatcherStore:
                     ON deal_listings(family, gpu);
                 CREATE INDEX IF NOT EXISTS idx_deal_listings_sku_gpu
                     ON deal_listings(sku, gpu);
+                CREATE INDEX IF NOT EXISTS idx_deal_listings_baseline
+                    ON deal_listings(baseline_eligible, gpu);
                 """
             )
             self._ensure_column(
                 conn,
                 table="deal_listings",
                 column="risk_score",
+                definition="INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                conn,
+                table="deal_listings",
+                column="baseline_eligible",
                 definition="INTEGER NOT NULL DEFAULT 0",
             )
 
@@ -110,6 +119,7 @@ class DealWatcherStore:
         specs: LaptopSpecs,
         risk_score: int = 0,
         source_url: str | None = None,
+        baseline_eligible: bool = True,
         published_at: datetime | None = None,
         observed_at: datetime | None = None,
     ) -> float | None:
@@ -129,8 +139,9 @@ class DealWatcherStore:
                 INSERT INTO deal_listings (
                     avito_id, title, seller_id, url, first_seen, last_seen,
                     published_at, brand, family, sku, cpu, gpu, ram_gb,
-                    storage_gb, condition, risk_score, source_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    storage_gb, condition, risk_score, source_url,
+                    baseline_eligible
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(avito_id) DO UPDATE SET
                     title=excluded.title,
                     seller_id=excluded.seller_id,
@@ -145,7 +156,11 @@ class DealWatcherStore:
                     storage_gb=excluded.storage_gb,
                     condition=excluded.condition,
                     risk_score=excluded.risk_score,
-                    source_url=excluded.source_url
+                    source_url=excluded.source_url,
+                    baseline_eligible=MAX(
+                        deal_listings.baseline_eligible,
+                        excluded.baseline_eligible
+                    )
                 """,
                 (
                     avito_id,
@@ -165,6 +180,7 @@ class DealWatcherStore:
                     specs.condition.value,
                     risk_score,
                     source_url,
+                    int(baseline_eligible),
                 ),
             )
             conn.execute(
@@ -234,6 +250,7 @@ class DealWatcherStore:
                       FROM deal_prices dp2
                       WHERE dp2.avito_id = dp.avito_id
                   )
+                  AND dl.baseline_eligible = 1
                   AND dl.risk_score <= 10
                   AND dl.condition NOT IN ('LIKE_NEW', 'USED', 'REFURBISHED', 'BROKEN')
                   AND {where}
