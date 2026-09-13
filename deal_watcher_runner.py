@@ -10,8 +10,9 @@ from deal_watcher import DealWatcherService, load_deal_watcher_config
 from deal_watcher.config import SafetyConfig
 from deal_watcher.safety import (
     HourlyRequestBudget,
+    PersistentBlockCircuit,
     jittered_interval,
-    validate_safe_runtime,
+    validate_direct_runtime,
 )
 from deal_watcher.search_profiles import SearchProfile, load_search_profiles
 from integrations.notifications.utils import escape_markdown_v2
@@ -21,7 +22,7 @@ from parser_cls import AvitoParse
 
 
 class LaptopDealAvitoParse(AvitoParse):
-    """Upstream Avito parser with laptop-specific deal intelligence."""
+    """Legacy direct Avito source with laptop-specific deal intelligence."""
 
     def __init__(
         self,
@@ -46,7 +47,8 @@ class LaptopDealAvitoParse(AvitoParse):
 
         if self.deal_watcher:
             logger.info(
-                "Laptop Deal Watcher включён: profile={} mode={} notify_score={} safe_mode={}",
+                "Laptop Deal Watcher LEGACY direct source: profile={} mode={} "
+                "notify_score={} safe_mode={}",
                 self.profile.name if self.profile else "default",
                 self.profile.mode if self.profile else "fast",
                 self.deal_config.notify_score,
@@ -60,7 +62,7 @@ class LaptopDealAvitoParse(AvitoParse):
             )
 
     def fetch_api_data(self, api_url: str, page: int) -> dict | None:
-        """Keep explicit access blocks visible to the safe scheduler."""
+        """Keep explicit access blocks visible to the guarded scheduler."""
         if self.stop_event and self.stop_event.is_set():
             return None
 
@@ -78,7 +80,6 @@ class LaptopDealAvitoParse(AvitoParse):
             return None
 
     def is_viewed(self, ad) -> bool:
-        """Use profile-scoped dedupe when watcher mode is active."""
         if self.deal_watcher and self.profile:
             price_detailed = getattr(ad, "priceDetailed", None)
             price = getattr(price_detailed, "value", None)
@@ -92,7 +93,6 @@ class LaptopDealAvitoParse(AvitoParse):
         return super().is_viewed(ad)
 
     def _AvitoParse__save_viewed(self, ads) -> None:
-        """Override upstream private seen writer for profile-scoped dedupe."""
         if self.deal_watcher and self.profile:
             records: list[tuple[int, int]] = []
             for ad in ads:
@@ -155,7 +155,6 @@ class LaptopDealAvitoParse(AvitoParse):
                     processed_ads.append(ad)
 
         self._AvitoParse__save_viewed(processed_ads)
-
         logger.info(
             "Laptop Deal Watcher: profile={} {} candidates -> {} notifications",
             self.profile.name if self.profile else "default",
@@ -195,23 +194,24 @@ def _schedule_after_global_block(
     profiles: list[SearchProfile],
     next_run: dict[str, float],
     safety: SafetyConfig,
-) -> float:
+    cooldown_seconds: float,
+) -> None:
     now = time.monotonic()
-    resume_at = now + safety.cooldown_after_block_seconds
+    resume_at = now + cooldown_seconds
     for profile in profiles:
         spread = random.uniform(0, safety.startup_spread_seconds)
         next_run[profile.name] = max(next_run[profile.name], resume_at + spread)
-    return resume_at
 
 
 def _notify_block(
     parser: LaptopDealAvitoParse,
     err: BlockedAccessError,
-    safety: SafetyConfig,
+    cooldown_seconds: float,
 ) -> None:
     message = (
-        f"Avito access blocked HTTP {err.status_code}. "
-        f"SAFE MODE pauses all searches for {safety.cooldown_after_block_seconds} seconds"
+        f"Avito direct source rejected HTTP {err.status_code}. "
+        f"Circuit breaker is open for about {cooldown_seconds / 3600:.1f} hours. "
+        "No automatic bypass or proxy rotation will be attempted."
     )
     try:
         parser.notifier.notify(message=escape_markdown_v2(message))
@@ -223,31 +223,56 @@ def _run_profile_scheduler(
     base_config,
     profiles: list[SearchProfile],
     safety: SafetyConfig,
+    database_path: str,
 ) -> None:
-    profiles = sorted(profiles, key=lambda p: 0 if p.mode == "market" else 1)
+    # FAST one-page profiles are the least expensive diagnostic lane. MARKET
+    # profiles are intentionally last; production market observations should
+    # normally arrive through feed mode instead of direct polling.
+    profiles = sorted(profiles, key=lambda p: 0 if p.mode == "fast" else 1)
+
+    run_once = bool(base_config.one_time_start)
+    if run_once and safety.enabled:
+        diagnostic = next((p for p in profiles if p.mode == "fast"), profiles[0])
+        diagnostic = replace(diagnostic, pages=1)
+        profiles = [diagnostic]
+        logger.warning(
+            "SAFE one_time_start is a single-profile canary now: profile={} pages=1",
+            diagnostic.name,
+        )
+
+    circuit = PersistentBlockCircuit(database_path)
+    remaining = circuit.seconds_remaining()
+    if safety.enabled and remaining > 0:
+        logger.error(
+            "Persistent circuit breaker is still open for {:.1f} hours; "
+            "direct Avito requests were not attempted. Use deal_feed_runner.py.",
+            remaining / 3600,
+        )
+        return
+
     parsers = {
         profile.name: _build_profile_parser(base_config, profile, safety)
         for profile in profiles
     }
     effective_profiles = [parsers[p.name].profile for p in profiles]
 
-    run_once = bool(base_config.one_time_start)
     completed_once: set[str] = set()
     start = time.monotonic()
     next_run: dict[str, float] = {}
     for index, profile in enumerate(effective_profiles):
-        if run_once or not safety.enabled:
+        if run_once:
+            next_run[profile.name] = 0.0
+            continue
+        if not safety.enabled:
             next_run[profile.name] = 0.0
             continue
 
-        lane_offset = (
-            0
-            if profile.mode == "market"
-            else safety.startup_spread_seconds
-        )
-        spread = random.uniform(0, safety.startup_spread_seconds)
-        if profile.mode == "market" and index == 0:
-            spread = 0.0
+        # No startup burst. Profiles are spread across the startup window and
+        # MARKET lanes are shifted behind FAST lanes.
+        lane_offset = index * max(1.0, safety.startup_spread_seconds / max(1, len(effective_profiles)))
+        if profile.mode == "market":
+            lane_offset += safety.startup_spread_seconds
+        spread = random.uniform(0, max(1.0, safety.startup_spread_seconds / 4))
         next_run[profile.name] = start + lane_offset + spread
 
     budget = HourlyRequestBudget(safety.max_requests_per_hour)
@@ -264,9 +289,17 @@ def _run_profile_scheduler(
                 continue
 
             if safety.enabled:
+                remaining = circuit.seconds_remaining()
+                if remaining > 0:
+                    logger.error(
+                        "Circuit breaker reopened externally; {:.1f} hours remain. Exiting direct source.",
+                        remaining / 3600,
+                    )
+                    return
+
                 budget_wait = budget.seconds_until_available(profile.pages, now)
                 if budget_wait > 0:
-                    extra = random.uniform(5.0, 30.0)
+                    extra = random.uniform(30.0, 120.0)
                     next_run[profile.name] = now + budget_wait + extra
                     logger.warning(
                         "Часовой бюджет запросов достигнут; profile={} отложен на {:.0f} сек.",
@@ -278,67 +311,70 @@ def _run_profile_scheduler(
 
             ran_any = True
             logger.info(
-                "Запуск профиля {} (mode={}, pages={})",
+                "Запуск LEGACY direct profile={} mode={} pages={}",
                 profile.name,
                 profile.mode,
                 profile.pages,
             )
             try:
                 parsers[profile.name].parse()
+                if safety.enabled:
+                    circuit.record_success()
                 if run_once:
                     completed_once.add(profile.name)
                     next_run[profile.name] = float("inf")
-                    logger.info(
-                        "Одноразовый тест profile={} завершён ({}/{})",
-                        profile.name,
-                        len(completed_once),
-                        len(effective_profiles),
-                    )
+                    logger.info("SAFE canary profile={} завершён", profile.name)
                 else:
                     delay = jittered_interval(profile, safety)
                     next_run[profile.name] = time.monotonic() + delay
                     logger.info(
-                        "Следующий запуск profile={} примерно через {:.0f} сек.",
+                        "Следующий direct profile={} не раньше чем через {:.0f} сек.",
                         profile.name,
                         delay,
                     )
             except BlockedAccessError as err:
+                cooldown = (
+                    circuit.record_block(safety)
+                    if safety.enabled
+                    else float(safety.cooldown_after_block_seconds)
+                )
                 logger.error(
-                    "SAFE MODE: HTTP {} для profile={}; все профили уходят в cooldown.",
+                    "HTTP {} для direct profile={}; persistent circuit breaker: {:.1f} hours.",
                     err.status_code,
                     profile.name,
+                    cooldown / 3600,
                 )
-                _notify_block(parsers[profile.name], err, safety)
+                _notify_block(parsers[profile.name], err, cooldown)
                 _schedule_after_global_block(
                     profiles=effective_profiles,
                     next_run=next_run,
                     safety=safety,
+                    cooldown_seconds=cooldown,
                 )
                 global_block = True
                 break
             except Exception as err:
-                logger.exception(
-                    "Профиль {} завершился ошибкой: {}",
-                    profile.name,
-                    err,
-                )
-                retry_base = min(300, profile.interval_seconds)
-                retry_jitter = random.uniform(0, 60) if safety.enabled else 0
-                retry_in = retry_base + retry_jitter
+                logger.exception("Direct profile {} завершился ошибкой: {}", profile.name, err)
+                # Unknown failures are not retried aggressively. A transient
+                # software/network failure should not become a request storm.
+                retry_in = max(900.0, float(profile.interval_seconds))
+                if safety.enabled:
+                    retry_in += random.uniform(60.0, 300.0)
                 next_run[profile.name] = time.monotonic() + retry_in
                 logger.warning(
-                    "Профиль {} будет повторён через {:.0f} сек.",
+                    "Direct profile {} будет повторён не раньше чем через {:.0f} сек.",
                     profile.name,
                     retry_in,
                 )
 
         if run_once and len(completed_once) == len(effective_profiles):
-            logger.info("Все поисковые профили обработаны один раз")
+            logger.info("SAFE direct canary completed")
             return
 
         if global_block:
-            time.sleep(30.0)
-            continue
+            # Do not keep a daemon sleeping for a day: persist the state and
+            # terminate. A supervisor restart will read the same open circuit.
+            return
 
         if not ran_any:
             sleep_for = min(next_run.values()) - time.monotonic()
@@ -346,7 +382,7 @@ def _run_profile_scheduler(
 
 
 def _run_legacy_loop(config) -> None:
-    """Fallback when deal_searches.toml is absent."""
+    """Non-SAFE upstream fallback; kept only for compatibility."""
     while True:
         try:
             parser = LaptopDealAvitoParse(config)
@@ -361,7 +397,7 @@ def _run_legacy_loop(config) -> None:
             break
         except Exception as err:
             logger.exception(err)
-            logger.error("Ошибка цикла. Повторный запуск через 30 сек.")
+            logger.error("Ошибка legacy цикла. Повторный запуск через 30 сек.")
             time.sleep(30)
 
 
@@ -369,10 +405,11 @@ def main() -> None:
     try:
         config = load_avito_config("config.toml")
         deal_config = load_deal_watcher_config("deal_watcher.toml")
-        validate_safe_runtime(config, deal_config.safety)
+        validate_direct_runtime(config, deal_config.safety)
     except Exception as err:
-        logger.error("Ошибка конфигурации: {}", err)
-        raise SystemExit(1)
+        logger.error("Direct source refused by configuration: {}", err)
+        logger.error("Production path: python deal_feed_runner.py")
+        raise SystemExit(2)
 
     try:
         profiles = load_search_profiles("deal_searches.toml")
@@ -382,7 +419,12 @@ def main() -> None:
 
     if profiles:
         try:
-            _run_profile_scheduler(config, profiles, deal_config.safety)
+            _run_profile_scheduler(
+                config,
+                profiles,
+                deal_config.safety,
+                deal_config.database_path,
+            )
         except KeyboardInterrupt:
             logger.info("Остановлено пользователем")
     else:
