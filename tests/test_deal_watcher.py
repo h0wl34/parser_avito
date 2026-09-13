@@ -294,6 +294,51 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(stats.sample_size, 5)
             self.assertEqual(stats.median_price, 124_000)
 
+    def test_fast_new_listing_does_not_enter_market_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DealWatcherStore(Path(tmp) / "test.db")
+            specs = LaptopSpecs(
+                brand="Lenovo",
+                gpu="RTX 5060",
+                condition=Condition.NEW_LIKELY,
+            )
+            for idx, price in enumerate(
+                [120_000, 122_000, 124_000, 126_000, 128_000], start=1
+            ):
+                store.record_listing(
+                    avito_id=idx,
+                    title=f"market {idx}",
+                    seller_id=None,
+                    url=None,
+                    price=price,
+                    specs=specs,
+                    baseline_eligible=True,
+                )
+            store.record_listing(
+                avito_id=99,
+                title="FAST bargain",
+                seller_id=None,
+                url=None,
+                price=80_000,
+                specs=specs,
+                baseline_eligible=False,
+            )
+            stats = store.market_stats(specs, min_samples=5)
+            self.assertEqual(stats.sample_size, 5)
+            self.assertEqual(stats.median_price, 124_000)
+
+            store.record_listing(
+                avito_id=99,
+                title="same listing later seen by MARKET",
+                seller_id=None,
+                url=None,
+                price=80_000,
+                specs=specs,
+                baseline_eligible=True,
+            )
+            promoted = store.market_stats(specs, min_samples=5)
+            self.assertEqual(promoted.sample_size, 6)
+
     def test_seen_state_is_scoped_by_profile_and_price(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = DealWatcherStore(Path(tmp) / "test.db")
