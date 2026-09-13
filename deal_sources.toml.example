@@ -1,0 +1,36 @@
+# Production-safe acquisition sources for Laptop Deal Watcher.
+# These sources feed listing events into scoring without polling Avito.
+
+[jsonl]
+# Generic integration point. Any authorized/external source may append one JSON
+# object per line to this file. The runner tails it and deduplicates by profile,
+# listing id and price.
+enabled = true
+path = "deal_feed.jsonl"
+poll_seconds = 2
+start_at_end = false
+
+[imap]
+# Optional: ingest listing links from saved-search notification emails.
+# Credentials are NEVER stored here; set the named environment variables.
+enabled = false
+host = "imap.example.com"
+port = 993
+folder = "INBOX"
+poll_seconds = 60
+sender_contains = "avito"
+username_env = "AVITO_MAIL_USER"
+password_env = "AVITO_MAIL_PASSWORD"
+profile = "imap-fast"
+mode = "fast"
+mark_seen = true
+
+# JSONL event format:
+# {"id": 1234567890, "title": "Lenovo Legion RTX 4070", "price": 99000,
+#  "url": "https://www.avito.ru/moskva/noutbuki/..._1234567890",
+#  "description": "optional", "profile": "fast-any-4070", "mode": "fast",
+#  "source": "my-feed", "published_at": "2026-09-13T12:30:00+03:00"}
+#
+# Set mode="market" for silent observations that are allowed into the dynamic
+# market baseline. FAST events can trigger Telegram notifications; MARKET events
+# never do.
