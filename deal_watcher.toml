@@ -10,11 +10,16 @@ enabled = true
 require_anonymous = true
 disable_enrichment_requests = true
 stop_on_block = true
-min_profile_interval_seconds = 300
-max_requests_per_hour = 120
-interval_jitter_ratio = 0.25
-startup_spread_seconds = 180
-cooldown_after_block_seconds = 21600
+# Production default: do not poll Avito directly. Use deal_feed_runner.py.
+allow_direct_avito_requests = false
+# These limits apply only if direct polling is explicitly enabled for diagnostics.
+min_profile_interval_seconds = 900
+max_requests_per_hour = 12
+interval_jitter_ratio = 0.20
+startup_spread_seconds = 900
+cooldown_after_block_seconds = 86400
+max_cooldown_after_block_seconds = 604800
+block_backoff_multiplier = 2.0
 block_statuses = [403, 429, 439]
 
 [series_bonus]
