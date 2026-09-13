@@ -8,9 +8,19 @@ def mask_sensitive_data(config_str: str) -> str:
     """
     masked = config_str
 
-    # Прокси: user:pass@host:port → user:***@host:port
+    # URL-прокси: scheme://user:pass@host:port → scheme://user:***@host:port.
+    # Пароль намеренно допускает спецсимволы (например !, $, %, =), чтобы
+    # proxy_notifier с SOCKS/HTTP URL не утекал в логи.
     masked = re.sub(
-        r"([\w\-]+):([\w\-]+)@([\w\.\-]+):(\d+)",
+        r"((?:https?|socks5h?)://)([^:@/\s'\"]+):([^@/\s'\"]+)@",
+        lambda m: f"{m.group(1)}{m.group(2)}:***@",
+        masked,
+        flags=re.IGNORECASE,
+    )
+
+    # Legacy proxy: user:pass@host:port → user:***@host:port.
+    masked = re.sub(
+        r"([\w\-]+):([^@\s,'\"]+)@([\w\.\-]+):(\d+)",
         lambda m: f"{m.group(1)}:***@{m.group(3)}:{m.group(4)}",
         masked,
     )
