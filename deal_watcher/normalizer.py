@@ -149,6 +149,13 @@ _RISK_TERMS: list[tuple[str, int, str]] = [
     ("восстановлен", 22, "восстановленный"),
     ("витринный", 9, "витринный"),
 ]
+_RISK_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
+    (
+        re.compile(r"без\s+(?:озу|оперативной памяти)\s*(?:и|/|,|\+)\s*(?:ssd|ссд|диска?)", re.I),
+        50,
+        "без ОЗУ/SSD",
+    ),
+]
 
 
 def _text(title: str | None, description: str | None) -> str:
@@ -248,9 +255,13 @@ def detect_condition(text: str) -> Condition:
 
 
 def assess_risk(title: str | None, description: str | None = None) -> RiskAssessment:
-    raw = _text(title, description).lower()
+    raw_text = _text(title, description)
+    raw = raw_text.lower()
     risk = RiskAssessment()
     for needle, penalty, flag in _RISK_TERMS:
         if needle in raw:
+            risk.add(penalty, flag)
+    for pattern, penalty, flag in _RISK_PATTERNS:
+        if pattern.search(raw_text):
             risk.add(penalty, flag)
     return risk
