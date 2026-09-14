@@ -35,8 +35,8 @@ class CompositeDeliveryTests(unittest.TestCase):
         notifier = CompositeNotifier([BadNotifier(), BadNotifier()])
         self.assertFalse(notifier.notify(message="x"))
 
-    def test_null_notifier_is_successful_noop(self):
-        self.assertTrue(NullNotifier().notify(message="x"))
+    def test_null_notifier_is_not_delivery(self):
+        self.assertFalse(NullNotifier().notify(message="x"))
 
 
 if __name__ == "__main__":
