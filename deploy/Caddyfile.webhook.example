@@ -1,0 +1,14 @@
+# Replace watcher.example.com with a DNS name pointing to the VPS.
+# Caddy will obtain/renew a public TLS certificate automatically when ports
+# 80/443 are reachable. Only the signed provider callback is public; /healthz
+# remains private behind the reverse SSH tunnel.
+watcher.example.com {
+    @avigram path /avigram-callback
+    handle @avigram {
+        reverse_proxy 127.0.0.1:18765
+    }
+
+    handle {
+        respond 404
+    }
+}
