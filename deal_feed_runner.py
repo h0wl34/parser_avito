@@ -34,9 +34,13 @@ class FeedProcessor:
 
     def process(self, candidate: ListingCandidate) -> bool:
         store = self.service.store
+        # On the feed path deal_seen means "an alert for this profile/id/price
+        # was successfully delivered", not merely "some revision was analyzed".
+        # The durable queue deduplicates identical revisions; edited content at
+        # the same price is intentionally re-scored until an alert is delivered.
         if store.is_seen(candidate.profile, candidate.avito_id, candidate.price):
             logger.debug(
-                "feed duplicate profile={} id={} price={}",
+                "feed already-alerted profile={} id={} price={}",
                 candidate.profile,
                 candidate.avito_id,
                 candidate.price,
@@ -50,9 +54,8 @@ class FeedProcessor:
             baseline_eligible=candidate.baseline_eligible,
         )
         if analysis is None:
-            store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
             logger.warning(
-                "feed skipped unscorable listing profile={} id={}",
+                "feed skipped unscorable listing profile={} id={}; future revisions remain eligible",
                 candidate.profile,
                 candidate.avito_id,
             )
@@ -97,7 +100,8 @@ class FeedProcessor:
             )
             return True
 
-        store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
+        # Do not mark low-scoring/MARKET events as alerted. Their queue event is
+        # ACKed by the worker, while a later edited revision can still be scored.
         return False
 
 
