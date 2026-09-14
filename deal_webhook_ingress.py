@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from typing import Type
@@ -36,7 +36,7 @@ def build_handler(
         )
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DealWatcherIngress/2.0"
+        server_version = "DealWatcherIngress/2.1"
 
         def _send(self, status: int, payload: dict) -> None:
             body = _json_bytes(payload)
@@ -140,7 +140,10 @@ def main() -> None:
     deal_config = load_deal_watcher_config("deal_watcher.toml")
     queue = FeedEventQueue(deal_config.database_path)
     handler = build_handler(config, queue)
-    server = HTTPServer((webhook.bind_host, webhook.port), handler)
+    # Provider retries can arrive in parallel.  ThreadingHTTPServer keeps one
+    # slow SQLite writer from blocking unrelated health checks/callbacks; SQLite
+    # still serializes commits with WAL + busy_timeout underneath.
+    server = ThreadingHTTPServer((webhook.bind_host, webhook.port), handler)
     logger.info(
         "Webhook ingress listening on {}:{}{}; provider={}; queue_db={}",
         webhook.bind_host,
