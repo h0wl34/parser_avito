@@ -17,13 +17,12 @@ def _safe_line(text: str) -> str:
 
 
 def _listing_url(ad: Any) -> str:
-    value = str(getattr(ad, "urlPath", "") or "").strip()
-    if value.startswith(("https://", "http://")):
-        return value
-    if value.startswith("/"):
-        return f"https://www.avito.ru{value}"
-    avito_id = getattr(ad, "id", "")
-    return f"https://www.avito.ru/{avito_id}"
+    raw = str(getattr(ad, "urlPath", "") or "").strip()
+    if raw.startswith(("https://www.avito.ru/", "https://avito.ru/")):
+        return raw
+    if raw.startswith("/"):
+        return "https://www.avito.ru" + raw
+    return f"https://www.avito.ru/{getattr(ad, 'id', '')}"
 
 
 def format_deal_markdown(ad: Any, analysis: DealAnalysis) -> str:
