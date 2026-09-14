@@ -18,16 +18,24 @@ class DealWatcherStore:
 
     @contextmanager
     def _connection(self):
-        conn = sqlite3.connect(self.db_path)
+        # Webhook ingress and the feed worker intentionally share one database.
+        # A busy timeout prevents transient writer contention from becoming a
+        # dropped event; WAL lets readers coexist with the single SQLite writer.
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 10000")
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
     def _ensure_schema(self) -> None:
         with self._connection() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS deal_listings (
