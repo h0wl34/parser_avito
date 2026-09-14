@@ -8,6 +8,7 @@ from deal_feed_runner import FeedProcessor, NotificationDeliveryError, _drain_qu
 from deal_watcher.config import DealWatcherConfig
 from deal_watcher.feed import ListingCandidate
 from deal_watcher.feed_queue import FeedEventQueue
+from deal_watcher.normalizer import extract_specs
 from deal_watcher.service import DealWatcherService
 
 
@@ -40,10 +41,13 @@ class FeedProcessorAcceptanceTests(unittest.TestCase):
         price=99_000,
         profile="fast-any-4070",
         mode="fast",
+        title="Lenovo Legion 5 RTX 4070 32GB 1TB",
+        description="",
     ):
         return ListingCandidate(
             avito_id=avito_id,
-            title="Lenovo Legion 5 RTX 4070 32GB 1TB",
+            title=title,
+            description=description,
             price=price,
             url=f"https://www.avito.ru/moskva/noutbuki/legion_{avito_id}",
             profile=profile,
@@ -83,7 +87,7 @@ class FeedProcessorAcceptanceTests(unittest.TestCase):
                 )
             )
 
-    def test_duplicate_same_profile_id_price_does_not_notify_twice(self):
+    def test_delivered_alert_suppresses_same_price_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
             processor = self._processor(Path(tmp) / "test.db")
             candidate = self._candidate()
@@ -91,9 +95,27 @@ class FeedProcessorAcceptanceTests(unittest.TestCase):
             self.assertFalse(processor.process(candidate))
             self.assertEqual(len(processor.notifier.messages), 1)
 
-    def test_price_change_is_new_observation(self):
+    def test_low_score_revision_does_not_block_richer_same_price_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
-            processor = self._processor(Path(tmp) / "test.db", notify_score=0)
+            processor = self._processor(Path(tmp) / "test.db")
+            sparse = self._candidate(title="Ноутбук RTX 4070")
+            rich = self._candidate(
+                title="Lenovo Legion 5 RTX 4070 32GB 1TB",
+                description="отличное состояние",
+            )
+
+            self.assertFalse(processor.process(sparse))
+            self.assertFalse(
+                processor.service.store.is_seen(
+                    sparse.profile, sparse.avito_id, sparse.price
+                )
+            )
+            self.assertTrue(processor.process(rich))
+            self.assertEqual(len(processor.notifier.messages), 1)
+
+    def test_price_change_is_new_alert_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db", notify_score=60)
             first = self._candidate(price=110_000)
             second = self._candidate(price=99_000)
             processor.process(first)
@@ -114,10 +136,12 @@ class FeedProcessorAcceptanceTests(unittest.TestCase):
             )
             self.assertFalse(processor.process(candidate))
             self.assertEqual(processor.notifier.messages, [])
-            specs = processor.service.analyze_item(
-                self._candidate(avito_id=999, price=120_000).to_item(),
-                baseline_eligible=False,
-            ).specs
+            self.assertFalse(
+                processor.service.store.is_seen(
+                    candidate.profile, candidate.avito_id, candidate.price
+                )
+            )
+            specs = extract_specs(candidate.title, candidate.description)
             stats = processor.service.store.market_stats(specs, min_samples=1)
             self.assertEqual(stats.sample_size, 1)
             self.assertEqual(stats.median_price, 99_000)
@@ -134,7 +158,7 @@ class FeedProcessorAcceptanceTests(unittest.TestCase):
                     fast.profile, fast.avito_id, fast.price
                 )
             )
-            self.assertTrue(
+            self.assertFalse(
                 processor.service.store.is_seen(
                     market.profile, market.avito_id, market.price
                 )
