@@ -15,6 +15,7 @@ from deal_watcher.feed import ListingCandidate, candidates_from_email, candidate
 from deal_watcher.feed_config import FeedSourcesConfig, load_feed_sources_config
 from deal_watcher.feed_queue import FeedEventQueue
 from deal_watcher.formatter import format_deal_markdown
+from deal_watcher.health import HealthStore
 from deal_watcher.jsonl_queue import file_identity, iter_complete_records
 from integrations.notifications.factory import build_notifier
 from load_config import load_avito_config
@@ -376,6 +377,11 @@ def run(
         deal_config_path=deal_config_path,
     )
     queue = FeedEventQueue(processor.deal_config.database_path)
+    health_store = (
+        HealthStore(processor.deal_config.database_path)
+        if processor.deal_config.health.enabled
+        else None
+    )
     _imap_credentials(sources)
 
     enabled = []
@@ -394,10 +400,18 @@ def run(
     last_imap = 0.0
     last_health = 0.0
     last_prune = 0.0
+    last_heartbeat = 0.0
     while True:
         now = time.monotonic()
         did_work = False
         try:
+            if health_store is not None and now - last_heartbeat >= 30:
+                health_store.touch_heartbeat(
+                    "feed_worker",
+                    details={"pid": os.getpid()},
+                )
+                last_heartbeat = now
+
             if sources.jsonl.enabled and now - last_jsonl >= sources.jsonl.poll_seconds:
                 did_work = bool(
                     _ingest_jsonl_once(
