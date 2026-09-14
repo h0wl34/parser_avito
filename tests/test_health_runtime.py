@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from deal_health_monitor import _drain_system_alerts
+from deal_health_monitor import _drain_system_alerts, _heartbeat_observation
 from deal_watcher.feed import ListingCandidate
 from deal_watcher.feed_queue import FeedEventQueue
 from deal_watcher.health import HealthStore, queue_health_snapshot
@@ -56,6 +56,64 @@ class HealthRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot.dead, 1)
             self.assertEqual(snapshot.pending, 1)
             self.assertAlmostEqual(snapshot.oldest_unfinished_age_seconds, 600, places=0)
+
+    def test_process_heartbeat_timeout_is_not_double_graced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HealthStore(Path(tmp) / "test.db")
+            t0 = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+            store.touch_heartbeat("feed_worker", now=t0)
+
+            # Heartbeat itself remains healthy through the configured timeout.
+            healthy, _ = _heartbeat_observation(
+                store,
+                service="feed_worker",
+                timeout_seconds=90,
+                now=t0 + timedelta(seconds=90),
+            )
+            self.assertTrue(healthy)
+
+            # Once stale, three consecutive 30-second observations are enough.
+            # There must not be another +120s generic grace period here.
+            for seconds in (91, 121):
+                healthy, summary = _heartbeat_observation(
+                    store,
+                    service="feed_worker",
+                    timeout_seconds=90,
+                    now=t0 + timedelta(seconds=seconds),
+                )
+                self.assertFalse(healthy)
+                state = store.observe(
+                    "feed_worker",
+                    healthy=healthy,
+                    severity="CRITICAL",
+                    summary=summary,
+                    grace_seconds=0,
+                    consecutive_required=3,
+                    repeat_alert_seconds=3600,
+                    now=t0 + timedelta(seconds=seconds),
+                )
+                self.assertEqual(state, "debouncing")
+
+            healthy, summary = _heartbeat_observation(
+                store,
+                service="feed_worker",
+                timeout_seconds=90,
+                now=t0 + timedelta(seconds=151),
+            )
+            state = store.observe(
+                "feed_worker",
+                healthy=healthy,
+                severity="CRITICAL",
+                summary=summary,
+                grace_seconds=0,
+                consecutive_required=3,
+                repeat_alert_seconds=3600,
+                now=t0 + timedelta(seconds=151),
+            )
+            self.assertEqual(state, "opened")
+            alert = store.claim_alert(now=t0 + timedelta(seconds=151))
+            self.assertIsNotNone(alert)
+            self.assertEqual(alert.incident_key, "feed_worker")
 
     def test_stale_open_alarm_is_not_sent_after_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
