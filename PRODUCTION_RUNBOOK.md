@@ -9,6 +9,7 @@
 - `deal_feed_runner.py` — durable queue -> normalizer -> scoring -> Telegram;
 - `deal_webhook_ingress.py` — подписанный webhook -> SQLite queue;
 - `deal_health_monitor.py` — low-noise health/incident monitor;
+- `deal-relay-tunnel.service` — persistent SSH local-forward до emergency relay на VPS;
 - `database.db` — listings, prices, queue, incidents и outbox.
 
 VPS с Amnezia/SOCKS:
@@ -27,7 +28,9 @@ VPS с Amnezia/SOCKS:
 
 ### Системный alert при падении SOCKS
 
-Основной сервер -> HTTPS emergency relay на VPS host -> Telegram напрямую.
+Основной сервер -> SSH local-forward -> relay на VPS host -> Telegram напрямую.
+
+Relay слушает только `127.0.0.1:8770` на VPS и не требует публичного порта. На основном сервере туннель поднимает `127.0.0.1:18770 -> VPS 127.0.0.1:8770`.
 
 Для relay рекомендуется отдельный Telegram bot token. Тогда неправильный/заблокированный основной bot token не ломает системные алерты.
 
@@ -62,8 +65,13 @@ nano .env.deal-watcher
 
 ```text
 AVIGRAM_CALLBACK_SECRET=<random secret>
-DEAL_ALERT_RELAY_URL=https://alerts.example.com/alert
+DEAL_ALERT_RELAY_URL=http://127.0.0.1:18770/alert
 DEAL_ALERT_RELAY_SECRET=<same relay secret as VPS>
+DEAL_RELAY_SSH_HOST=<VPS IP/host>
+DEAL_RELAY_SSH_USER=root
+DEAL_RELAY_SSH_KEY=/home/<user>/.ssh/deal_relay_ed25519
+DEAL_RELAY_LOCAL_PORT=18770
+DEAL_RELAY_REMOTE_PORT=8770
 ```
 
 Секрет удобно сгенерировать:
@@ -72,6 +80,23 @@ DEAL_ALERT_RELAY_SECRET=<same relay secret as VPS>
 openssl rand -hex 32
 ```
 
+### SSH key для relay tunnel
+
+На основном сервере:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/deal_relay_ed25519 -N '' -C 'deal-watcher-relay'
+ssh-copy-id -i ~/.ssh/deal_relay_ed25519.pub root@<VPS>
+```
+
+Проверить именно non-interactive login:
+
+```bash
+ssh -i ~/.ssh/deal_relay_ed25519 -o BatchMode=yes root@<VPS> 'echo RELAY_SSH_OK'
+```
+
+Перед systemd один раз установить host key обычным SSH или `ssh-keyscan` с ручной проверкой fingerprint; tunnel использует `StrictHostKeyChecking=yes`.
+
 ### systemd --user
 
 ```bash
@@ -79,7 +104,21 @@ mkdir -p ~/.config/systemd/user
 cp deploy/systemd/deal-feed.service ~/.config/systemd/user/
 cp deploy/systemd/deal-webhook.service ~/.config/systemd/user/
 cp deploy/systemd/deal-health.service ~/.config/systemd/user/
+cp deploy/systemd/deal-relay-tunnel.service ~/.config/systemd/user/
 systemctl --user daemon-reload
+```
+
+Сначала поднять tunnel:
+
+```bash
+systemctl --user enable --now deal-relay-tunnel.service
+curl http://127.0.0.1:18770/healthz
+```
+
+Ожидание:
+
+```json
+{"status":"ok"}
 ```
 
 После настройки реального webhook:
@@ -97,8 +136,8 @@ sudo loginctl enable-linger "$USER"
 Проверка:
 
 ```bash
-systemctl --user status deal-feed deal-webhook deal-health --no-pager
-journalctl --user -u deal-feed -u deal-webhook -u deal-health -n 200 --no-pager
+systemctl --user status deal-relay-tunnel deal-feed deal-webhook deal-health --no-pager
+journalctl --user -u deal-relay-tunnel -u deal-feed -u deal-webhook -u deal-health -n 200 --no-pager
 ```
 
 ## 4. VPS relay/watchdog
@@ -144,32 +183,27 @@ systemctl --user enable --now deal-alert-relay.service deal-external-watchdog.se
 sudo loginctl enable-linger "$USER"
 ```
 
-## 5. TLS/reverse proxy
+Relay остаётся host-level process и **не помещается в Amnezia/Docker failure domain**.
 
-Production webhook и emergency relay должны быть за HTTPS.
+## 5. Public ingress / TLS
 
-Пример логики reverse proxy:
+Публичным должен быть только webhook/health endpoint основного watcher, потому что внешний provider и VPS watchdog должны достучаться до него.
 
-Main server:
+Пример reverse proxy на основном сервере:
 
 ```text
 https://watcher.example.com/avigram-callback -> 127.0.0.1:8765/avigram-callback
 https://watcher.example.com/healthz          -> 127.0.0.1:8765/healthz
 ```
 
-VPS:
-
-```text
-https://alerts.example.com/alert   -> 127.0.0.1:8770/alert
-https://alerts.example.com/healthz -> 127.0.0.1:8770/healthz
-```
+Emergency relay **не публикуется**: он доступен основному серверу только через SSH local-forward.
 
 Рекомендуется firewall/reverse-proxy ACL:
 
 - `/avigram-callback` доступен provider'у, но защищён HMAC callback secret;
 - main `/healthz` по возможности разрешён только с IP VPS;
-- relay `/alert` по возможности разрешён только с IP основного watcher-server и дополнительно защищён HMAC;
-- Python ports `8765/8770` не выставлять в Internet напрямую, если используется reverse proxy.
+- Python port `8765` не выставлять в Internet напрямую, если используется reverse proxy;
+- VPS relay `8770` оставлять на `127.0.0.1`.
 
 ## 6. Low-noise health policy
 
@@ -186,7 +220,7 @@ Default `deal_watcher.toml`:
 - disk <1 GiB — WARNING, <256 MiB — CRITICAL;
 - SQLite `quick_check` — раз в час;
 - Telegram Bot API probe через normal SOCKS — раз в минуту;
-- emergency relay probe — раз в 5 min.
+- emergency relay probe через SSH tunnel — раз в 5 min.
 
 Health-monitor следит за heartbeat worker/ingress, а не за частотой новых объявлений. Тишина на рынке не является аварией.
 
@@ -223,18 +257,26 @@ systemctl --user start deal-feed.service
 1. обычный Telegram path перестаёт проходить;
 2. одиночные failures молчат;
 3. persistent failure открывает `CRITICAL [telegram_path]`;
-4. сообщение приходит через emergency relay/system bot;
+4. сообщение приходит через SSH tunnel -> emergency relay -> system bot;
 5. после восстановления SOCKS приходит `RECOVERED`.
 
-### Emergency relay outage
+### SSH tunnel/relay outage
 
-При рабочем основном Telegram остановить relay:
+При рабочем основном Telegram остановить tunnel на main server:
+
+```bash
+systemctl --user stop deal-relay-tunnel.service
+```
+
+Health-monitor через persistent probes должен прислать WARNING обычным Telegram. После запуска tunnel — RECOVERED.
+
+Отдельно можно остановить relay на VPS:
 
 ```bash
 systemctl --user stop deal-alert-relay.service
 ```
 
-Health-monitor через несколько persistent probes должен прислать WARNING обычным Telegram. После запуска relay — RECOVERED.
+Результат должен быть тем же.
 
 ### Whole main endpoint outage
 
@@ -287,11 +329,25 @@ listing published -> provider callback -> SQLite queue -> Telegram
 
 Нужно измерять минимум несколько десятков событий в разное время суток. Если provider окажется медленным/ненадёжным, intelligence/queue/storage/health менять не нужно: заменяется только source adapter.
 
-## 10. Security invariants
+## 10. Docker decision
+
+Текущая production-схема намеренно host-native/systemd для аварийного пути.
+
+Допустимая следующая итерация:
+
+- `deal_feed_runner.py`, `deal_webhook_ingress.py`, `deal_health_monitor.py` -> один Docker image + Compose services;
+- SQLite/config -> bind mounts/volume на локальном filesystem;
+- `deal-relay-tunnel.service` остаётся host-level systemd;
+- VPS `deal_alert_relay.py` и `deal_external_watchdog.py` остаются host-level systemd и вне Amnezia/Docker failure domain.
+
+Не помещать emergency relay в тот же Docker daemon/Compose, что и SOCKS: падение Docker daemon тогда уничтожит и основной, и аварийный Telegram paths одновременно.
+
+## 11. Security invariants
 
 - основной Avito account/cookies watcher'у не передавать;
 - `allow_direct_avito_requests=false` оставлять в production;
 - secrets только в gitignored env/config;
 - callback/relay HMAC secrets разные от Telegram bot tokens;
 - для system alerts предпочтителен отдельный Telegram bot;
+- SSH key для relay tunnel отдельный от обычных administrative keys;
 - после случайного появления token/password в log/chat credential ротировать.
