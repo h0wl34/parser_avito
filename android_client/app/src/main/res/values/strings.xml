@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Avito Push Bridge</string>
+    <string name="listener_name">Avito Push Bridge — доступ к уведомлениям</string>
+    <string name="intro_text">Перехватывает только уведомления выбранных пакетов (по умолчанию com.avito.android), сохраняет их локально и при настроенном HTTPS endpoint отправляет на ваш сервер с HMAC-подписью. Само приложение к Avito не обращается.</string>
+</resources>
