@@ -13,6 +13,7 @@ from deal_watcher import DealWatcherService, load_deal_watcher_config
 from deal_watcher.feed import ListingCandidate, candidates_from_email, candidates_from_json_lines
 from deal_watcher.feed_config import FeedSourcesConfig, load_feed_sources_config
 from deal_watcher.formatter import format_deal_markdown
+from deal_watcher.jsonl_queue import file_identity, iter_complete_records
 from integrations.notifications.factory import build_notifier
 from load_config import load_avito_config
 
@@ -79,8 +80,8 @@ class FeedProcessor:
                 message=format_deal_markdown(item, analysis)
             )
             if delivered is False:
-                # Do not acknowledge the event. JSONL keeps its cursor on this
-                # line; IMAP keeps the email unread, so the alert is retried.
+                # Do not acknowledge the event. JSONL keeps its durable cursor
+                # on this line; IMAP keeps the email unread, so the alert retries.
                 raise NotificationDeliveryError(
                     f"all notification backends failed for listing {candidate.avito_id}"
                 )
@@ -107,7 +108,6 @@ def _run_jsonl_once(
     *,
     config: FeedSourcesConfig,
     processor: FeedProcessor,
-    offsets: dict[str, int],
 ) -> int:
     source = config.jsonl
     if not source.enabled:
@@ -115,54 +115,69 @@ def _run_jsonl_once(
 
     path = Path(source.path)
     _ensure_feed_file(path)
-    key = str(path.resolve())
-    offset = offsets.get(key)
-    if offset is None:
-        offset = path.stat().st_size if source.start_at_end else 0
-
+    resolved = str(path.resolve())
+    source_key = f"jsonl:{resolved}"
+    identity = file_identity(path)
     size = path.stat().st_size
-    if size < offset:
-        logger.warning("JSONL feed was truncated; restarting at byte 0")
-        offset = 0
+
+    checkpoint = processor.service.store.get_feed_cursor(source_key)
+    if checkpoint is None:
+        offset = size if source.start_at_end else 0
+        # Persist even the initial end-of-file bootstrap. Otherwise every
+        # restart with start_at_end=true would skip events appended since the
+        # previous process started.
+        processor.service.store.save_feed_cursor(source_key, identity, offset)
+    else:
+        checkpoint_identity, offset = checkpoint
+        if checkpoint_identity != identity:
+            logger.warning(
+                "JSONL feed file was replaced/rotated; restarting new file at byte 0"
+            )
+            offset = 0
+            processor.service.store.save_feed_cursor(source_key, identity, offset)
+        elif size < offset:
+            logger.warning("JSONL feed was truncated; restarting at byte 0")
+            offset = 0
+            processor.service.store.save_feed_cursor(source_key, identity, offset)
 
     processed = 0
-    with path.open("r", encoding="utf-8") as fh:
-        fh.seek(offset)
-        while True:
-            line_start = fh.tell()
-            line = fh.readline()
-            if not line:
-                break
+    for record in iter_complete_records(path, offset=offset):
+        try:
+            candidates = list(candidates_from_json_lines([record.line]))
+        except Exception as err:
+            # A complete but malformed record is poison input: log it and move
+            # past it.  Incomplete final records never reach this branch.
+            logger.error(
+                "invalid JSONL feed event at byte {}: {}",
+                record.start_offset,
+                err,
+            )
+            processor.service.store.save_feed_cursor(
+                source_key,
+                identity,
+                record.end_offset,
+            )
+            continue
 
-            try:
-                candidates = list(candidates_from_json_lines([line]))
-            except Exception as err:
-                # Malformed input is consumed so one bad external event cannot
-                # poison the durable feed forever.
-                logger.error(
-                    "invalid JSONL feed event at byte {}: {}",
-                    line_start,
-                    err,
-                )
-                offsets[key] = fh.tell()
-                continue
+        try:
+            for candidate in candidates:
+                processor.process(candidate)
+                processed += 1
+        except Exception as err:
+            # Processing/delivery failure is retryable.  Crucially, do NOT move
+            # the durable cursor; a restart will replay the same event.
+            logger.error(
+                "feed event processing failed at byte {}; will retry: {}",
+                record.start_offset,
+                err,
+            )
+            return processed
 
-            try:
-                for candidate in candidates:
-                    processor.process(candidate)
-                    processed += 1
-            except Exception as err:
-                # Processing/delivery failure is different from malformed input:
-                # keep the cursor on the current line and retry it next cycle.
-                offsets[key] = line_start
-                logger.error(
-                    "feed event processing failed at byte {}; will retry: {}",
-                    line_start,
-                    err,
-                )
-                return processed
-
-            offsets[key] = fh.tell()
+        processor.service.store.save_feed_cursor(
+            source_key,
+            identity,
+            record.end_offset,
+        )
     return processed
 
 
@@ -224,11 +239,16 @@ def _run_imap_once(
                 source="imap",
             )
             if not candidates:
-                logger.warning(
+                # Never acknowledge an unparseable notification.  A provider
+                # template change must be visible instead of silently losing a
+                # potentially valuable listing.
+                logger.error(
                     "IMAP notification uid={} contained no reliably parseable listing; "
-                    "send a raw sample to adapt the parser if this persists",
+                    "leaving it unread for investigation",
                     uid.decode(errors="ignore"),
                 )
+                continue
+
             for candidate in candidates:
                 processor.process(candidate)
                 processed += 1
@@ -263,7 +283,6 @@ def run(
         ", ".join(enabled),
     )
 
-    offsets: dict[str, int] = {}
     last_jsonl = 0.0
     last_imap = 0.0
     while True:
@@ -272,7 +291,7 @@ def run(
         try:
             if sources.jsonl.enabled and now - last_jsonl >= sources.jsonl.poll_seconds:
                 did_work = bool(
-                    _run_jsonl_once(config=sources, processor=processor, offsets=offsets)
+                    _run_jsonl_once(config=sources, processor=processor)
                 ) or did_work
                 last_jsonl = now
 
