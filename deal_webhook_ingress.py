@@ -7,9 +7,10 @@ from typing import Type
 
 from loguru import logger
 
+from deal_watcher import load_deal_watcher_config
 from deal_watcher.feed_config import FeedSourcesConfig, load_feed_sources_config
+from deal_watcher.feed_queue import FeedEventQueue
 from deal_watcher.webhook import (
-    append_candidate_durable,
     candidate_from_avigram_payload,
     verify_avigram_signature,
 )
@@ -19,9 +20,11 @@ def _json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def build_handler(config: FeedSourcesConfig) -> Type[BaseHTTPRequestHandler]:
+def build_handler(
+    config: FeedSourcesConfig,
+    queue: FeedEventQueue,
+) -> Type[BaseHTTPRequestHandler]:
     webhook = config.webhook
-    spool_path = config.jsonl.path
     secret = os.environ.get(webhook.secret_env, "")
     if webhook.require_signature and not secret:
         raise ValueError(
@@ -33,7 +36,7 @@ def build_handler(config: FeedSourcesConfig) -> Type[BaseHTTPRequestHandler]:
         )
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DealWatcherIngress/1.0"
+        server_version = "DealWatcherIngress/2.0"
 
         def _send(self, status: int, payload: dict) -> None:
             body = _json_bytes(payload)
@@ -46,7 +49,14 @@ def build_handler(config: FeedSourcesConfig) -> Type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/healthz":
-                self._send(200, {"status": "ok", "ingress": webhook.provider})
+                self._send(
+                    200,
+                    {
+                        "status": "ok",
+                        "ingress": webhook.provider,
+                        "queue": queue.stats(),
+                    },
+                )
                 return
             self._send(404, {"error": "not found"})
 
@@ -86,27 +96,34 @@ def build_handler(config: FeedSourcesConfig) -> Type[BaseHTTPRequestHandler]:
                     payload,
                     market_name_prefixes=webhook.market_name_prefixes,
                 )
-                append_candidate_durable(candidate, spool_path)
+                inserted = queue.enqueue(candidate)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as err:
                 logger.warning("Rejected invalid webhook payload: {}", err)
                 self._send(400, {"error": "invalid payload"})
                 return
             except OSError as err:
                 # Returning 5xx lets providers with retry semantics try again;
-                # never ACK before the event is durably appended.
-                logger.error("Could not durably spool webhook event: {}", err)
-                self._send(503, {"error": "spool unavailable"})
+                # never ACK before SQLite has committed the event.
+                logger.error("Could not durably queue webhook event: {}", err)
+                self._send(503, {"error": "queue unavailable"})
+                return
+            except Exception as err:
+                logger.exception("Webhook queue failure: {}", err)
+                self._send(503, {"error": "queue unavailable"})
                 return
 
             logger.info(
-                "webhook accepted source={} profile={} mode={} id={} price={}",
+                "webhook accepted source={} profile={} mode={} id={} price={} new={}",
                 candidate.source,
                 candidate.profile,
                 candidate.mode,
                 candidate.avito_id,
                 candidate.price,
+                inserted,
             )
-            self._send(202, {"status": "accepted"})
+            # Duplicate provider retries are successful deliveries too: the
+            # normalized event is already durably present in the queue.
+            self._send(202, {"status": "accepted", "queued": inserted})
 
         def log_message(self, format: str, *args) -> None:
             logger.debug("webhook client={} {}", self.client_address[0], format % args)
@@ -120,15 +137,17 @@ def main() -> None:
     if not webhook.enabled:
         raise SystemExit("webhook.enabled=false in deal_sources.toml")
 
-    handler = build_handler(config)
+    deal_config = load_deal_watcher_config("deal_watcher.toml")
+    queue = FeedEventQueue(deal_config.database_path)
+    handler = build_handler(config, queue)
     server = HTTPServer((webhook.bind_host, webhook.port), handler)
     logger.info(
-        "Webhook ingress listening on {}:{}{}; provider={}; spool={}",
+        "Webhook ingress listening on {}:{}{}; provider={}; queue_db={}",
         webhook.bind_host,
         webhook.port,
         webhook.path,
         webhook.provider,
-        config.jsonl.path,
+        deal_config.database_path,
     )
     logger.info(
         "Ingress makes no Avito requests. Put TLS/reverse proxy in front before exposing it publicly."
