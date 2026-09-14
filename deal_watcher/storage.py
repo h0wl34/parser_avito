@@ -66,6 +66,13 @@ class DealWatcherStore:
                     PRIMARY KEY (profile, avito_id, price)
                 );
 
+                CREATE TABLE IF NOT EXISTS deal_feed_cursor (
+                    source_key TEXT PRIMARY KEY,
+                    file_identity TEXT NOT NULL,
+                    byte_offset INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_deal_prices_time
                     ON deal_prices(observed_at);
                 CREATE INDEX IF NOT EXISTS idx_deal_listings_gpu
@@ -128,10 +135,20 @@ class DealWatcherStore:
         published = published_at.isoformat() if published_at else None
 
         with self._connection() as conn:
-            previous = conn.execute(
+            latest = conn.execute(
                 "SELECT price FROM deal_prices "
                 "WHERE avito_id = ? ORDER BY observed_at DESC LIMIT 1",
                 (avito_id,),
+            ).fetchone()
+            # Keep the previous *different* price available across retries.  A
+            # failed Telegram delivery may cause the same event to be analyzed
+            # again; its price-drop signal must not disappear merely because the
+            # current price was already persisted on the first attempt.
+            previous_different = conn.execute(
+                "SELECT price FROM deal_prices "
+                "WHERE avito_id = ? AND price != ? "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (avito_id, price),
             ).fetchone()
 
             conn.execute(
@@ -147,6 +164,10 @@ class DealWatcherStore:
                     seller_id=excluded.seller_id,
                     url=excluded.url,
                     last_seen=excluded.last_seen,
+                    published_at=COALESCE(
+                        excluded.published_at,
+                        deal_listings.published_at
+                    ),
                     brand=excluded.brand,
                     family=excluded.family,
                     sku=excluded.sku,
@@ -183,14 +204,25 @@ class DealWatcherStore:
                     int(baseline_eligible),
                 ),
             )
-            conn.execute(
-                "INSERT OR IGNORE INTO deal_prices "
-                "(avito_id, observed_at, price) VALUES (?, ?, ?)",
-                (avito_id, stamp, price),
-            )
+            # deal_prices is a change history, not a poll log.  Storing the same
+            # price repeatedly makes retries noisy and hides the previous price.
+            if latest is None or latest["price"] != price:
+                conn.execute(
+                    "INSERT OR IGNORE INTO deal_prices "
+                    "(avito_id, observed_at, price) VALUES (?, ?, ?)",
+                    (avito_id, stamp, price),
+                )
 
-        if previous and previous["price"] and previous["price"] > price:
-            return (previous["price"] - price) / previous["price"] * 100
+        if (
+            previous_different
+            and previous_different["price"]
+            and previous_different["price"] > price
+        ):
+            return (
+                (previous_different["price"] - price)
+                / previous_different["price"]
+                * 100
+            )
         return None
 
     def is_seen(self, profile: str, avito_id: int, price: int) -> bool:
@@ -226,6 +258,45 @@ class DealWatcherStore:
                 VALUES (?, ?, ?, ?)
                 """,
                 rows,
+            )
+
+    def get_feed_cursor(self, source_key: str) -> tuple[str, int] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT file_identity, byte_offset
+                FROM deal_feed_cursor
+                WHERE source_key = ?
+                """,
+                (source_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["file_identity"]), int(row["byte_offset"])
+
+    def save_feed_cursor(
+        self,
+        source_key: str,
+        file_identity: str,
+        byte_offset: int,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        if byte_offset < 0:
+            raise ValueError("byte_offset must be >= 0")
+        stamp = (observed_at or datetime.now(timezone.utc)).isoformat()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO deal_feed_cursor (
+                    source_key, file_identity, byte_offset, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    file_identity=excluded.file_identity,
+                    byte_offset=excluded.byte_offset,
+                    updated_at=excluded.updated_at
+                """,
+                (source_key, file_identity, byte_offset, stamp),
             )
 
     def market_stats(
