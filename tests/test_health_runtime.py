@@ -28,7 +28,7 @@ class HealthRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "test.db"
             queue = FeedEventQueue(db)
-            t0 = datetime(2026, 9, 14, 8, 0, tzinfo=UTC)
+            t0 = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
             first = ListingCandidate(
                 avito_id=1,
                 title="Lenovo Legion 5 RTX 4070",
@@ -61,7 +61,10 @@ class HealthRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = HealthStore(Path(tmp) / "test.db")
             sender = FakeSender()
-            t0 = datetime(2026, 9, 14, 8, 0, tzinfo=UTC)
+            # Keep synthetic outbox timestamps safely in the past relative to
+            # the CI wall clock. claim_alert() intentionally refuses future
+            # next_attempt_at values.
+            t0 = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
             store.observe(
                 "telegram_path",
                 healthy=False,
