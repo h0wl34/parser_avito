@@ -1,0 +1,17 @@
+[Unit]
+Description=Laptop Deal Watcher emergency Telegram relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/parser_avito
+EnvironmentFile=-%h/parser_avito/.env.deal-relay
+ExecStart=%h/parser_avito/.venv-avito/bin/python %h/parser_avito/deal_alert_relay.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target
