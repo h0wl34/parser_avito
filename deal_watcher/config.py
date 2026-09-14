@@ -79,6 +79,10 @@ class DealWatcherConfig:
     notify_score: int = 80
     market_window_days: int = 30
     min_market_samples: int = 5
+    # A FAST event that sat in our local durable queue longer than this is no
+    # longer useful as a time-sensitive alert. It is still analyzed/stored, but
+    # delivery is suppressed so a Telegram outage cannot produce an old flood.
+    max_fast_event_age_seconds: int = 7_200
     database_path: str = "database.db"
     series_bonus: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SERIES_BONUS))
     gpu_thresholds: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_GPU_THRESHOLDS))
@@ -94,11 +98,16 @@ def load_deal_watcher_config(path: str | Path = "deal_watcher.toml") -> DealWatc
         raw = tomllib.load(fh)
 
     section = raw.get("deal_watcher", raw)
+    max_fast_event_age_seconds = int(section.get("max_fast_event_age_seconds", 7_200))
+    if max_fast_event_age_seconds < 0:
+        raise ValueError("max_fast_event_age_seconds must be >= 0")
+
     config = DealWatcherConfig(
         enabled=bool(section.get("enabled", False)),
         notify_score=int(section.get("notify_score", 80)),
         market_window_days=int(section.get("market_window_days", 30)),
         min_market_samples=int(section.get("min_market_samples", 5)),
+        max_fast_event_age_seconds=max_fast_event_age_seconds,
         database_path=str(section.get("database_path", "database.db")),
     )
 
