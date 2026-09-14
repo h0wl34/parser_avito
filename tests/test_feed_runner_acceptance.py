@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -177,6 +178,28 @@ class FeedProcessorAcceptanceTests(unittest.TestCase):
             stats = queue.stats()
             self.assertEqual(stats["pending"], 1)
             self.assertEqual(stats["done"], 0)
+
+    def test_stale_fast_backlog_is_analyzed_but_not_alerted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "test.db"
+            processor = self._processor(db)
+            queue = FeedEventQueue(db)
+            old = datetime.now(timezone.utc) - timedelta(hours=3)
+            candidate = self._candidate(avito_id=1234567999)
+            queue.enqueue(candidate, observed_at=old)
+
+            self.assertEqual(_drain_queue_once(processor=processor, queue=queue), 1)
+            self.assertEqual(processor.notifier.messages, [])
+            self.assertEqual(queue.stats()["done"], 1)
+            self.assertFalse(
+                processor.service.store.is_seen(
+                    candidate.profile, candidate.avito_id, candidate.price
+                )
+            )
+            specs = extract_specs(candidate.title, candidate.description)
+            # It was still analyzed into deal_listings even though alert delivery
+            # was suppressed as stale.
+            self.assertIsNotNone(specs.gpu)
 
 
 if __name__ == "__main__":
