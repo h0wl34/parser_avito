@@ -9,6 +9,7 @@ DEFAULT_SERIES_BONUS = {
     "ThinkBook 16+": 15,
     "ThinkBook 16p": 15,
     "ROG Zephyrus": 15,
+    "ROG Strix": 12,
     "Yoga Pro": 14,
     "ProArt": 14,
     "Legion 7": 12,
@@ -74,6 +75,57 @@ class SafetyConfig:
 
 
 @dataclass(slots=True)
+class HealthConfig:
+    """Low-noise operational health monitoring and incident escalation."""
+
+    enabled: bool = True
+    check_interval_seconds: int = 30
+    failure_grace_seconds: int = 120
+    consecutive_failures: int = 3
+    repeat_alert_seconds: int = 21_600
+    worker_heartbeat_timeout_seconds: int = 150
+    ingress_heartbeat_timeout_seconds: int = 150
+    telegram_probe_seconds: int = 60
+    queue_oldest_pending_seconds: int = 600
+    queue_pending_warning: int = 25
+    dead_letter_critical: int = 1
+    disk_free_warning_mb: int = 1024
+    disk_free_critical_mb: int = 256
+    relay_url_env: str = "DEAL_ALERT_RELAY_URL"
+    relay_secret_env: str = "DEAL_ALERT_RELAY_SECRET"
+
+    def validate(self) -> None:
+        if self.check_interval_seconds < 10:
+            raise ValueError("health.check_interval_seconds must be >= 10")
+        if self.failure_grace_seconds < self.check_interval_seconds:
+            raise ValueError(
+                "health.failure_grace_seconds must be >= check_interval_seconds"
+            )
+        if self.consecutive_failures < 1:
+            raise ValueError("health.consecutive_failures must be >= 1")
+        if self.repeat_alert_seconds < 300:
+            raise ValueError("health.repeat_alert_seconds must be >= 300")
+        if self.worker_heartbeat_timeout_seconds < 30:
+            raise ValueError("health.worker_heartbeat_timeout_seconds must be >= 30")
+        if self.ingress_heartbeat_timeout_seconds < 30:
+            raise ValueError("health.ingress_heartbeat_timeout_seconds must be >= 30")
+        if self.telegram_probe_seconds < 30:
+            raise ValueError("health.telegram_probe_seconds must be >= 30")
+        if self.queue_oldest_pending_seconds < 60:
+            raise ValueError("health.queue_oldest_pending_seconds must be >= 60")
+        if self.queue_pending_warning < 1:
+            raise ValueError("health.queue_pending_warning must be >= 1")
+        if self.dead_letter_critical < 1:
+            raise ValueError("health.dead_letter_critical must be >= 1")
+        if self.disk_free_critical_mb < 64:
+            raise ValueError("health.disk_free_critical_mb must be >= 64")
+        if self.disk_free_warning_mb <= self.disk_free_critical_mb:
+            raise ValueError(
+                "health.disk_free_warning_mb must be > disk_free_critical_mb"
+            )
+
+
+@dataclass(slots=True)
 class DealWatcherConfig:
     enabled: bool = False
     notify_score: int = 80
@@ -87,6 +139,7 @@ class DealWatcherConfig:
     series_bonus: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SERIES_BONUS))
     gpu_thresholds: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_GPU_THRESHOLDS))
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
 
 
 def load_deal_watcher_config(path: str | Path = "deal_watcher.toml") -> DealWatcherConfig:
@@ -155,5 +208,64 @@ def load_deal_watcher_config(path: str | Path = "deal_watcher.toml") -> DealWatc
             block_statuses=statuses,
         )
         config.safety.validate()
+
+    health = raw.get("health", {})
+    if isinstance(health, dict):
+        defaults = config.health
+        config.health = HealthConfig(
+            enabled=bool(health.get("enabled", defaults.enabled)),
+            check_interval_seconds=int(
+                health.get("check_interval_seconds", defaults.check_interval_seconds)
+            ),
+            failure_grace_seconds=int(
+                health.get("failure_grace_seconds", defaults.failure_grace_seconds)
+            ),
+            consecutive_failures=int(
+                health.get("consecutive_failures", defaults.consecutive_failures)
+            ),
+            repeat_alert_seconds=int(
+                health.get("repeat_alert_seconds", defaults.repeat_alert_seconds)
+            ),
+            worker_heartbeat_timeout_seconds=int(
+                health.get(
+                    "worker_heartbeat_timeout_seconds",
+                    defaults.worker_heartbeat_timeout_seconds,
+                )
+            ),
+            ingress_heartbeat_timeout_seconds=int(
+                health.get(
+                    "ingress_heartbeat_timeout_seconds",
+                    defaults.ingress_heartbeat_timeout_seconds,
+                )
+            ),
+            telegram_probe_seconds=int(
+                health.get("telegram_probe_seconds", defaults.telegram_probe_seconds)
+            ),
+            queue_oldest_pending_seconds=int(
+                health.get(
+                    "queue_oldest_pending_seconds",
+                    defaults.queue_oldest_pending_seconds,
+                )
+            ),
+            queue_pending_warning=int(
+                health.get("queue_pending_warning", defaults.queue_pending_warning)
+            ),
+            dead_letter_critical=int(
+                health.get("dead_letter_critical", defaults.dead_letter_critical)
+            ),
+            disk_free_warning_mb=int(
+                health.get("disk_free_warning_mb", defaults.disk_free_warning_mb)
+            ),
+            disk_free_critical_mb=int(
+                health.get("disk_free_critical_mb", defaults.disk_free_critical_mb)
+            ),
+            relay_url_env=str(
+                health.get("relay_url_env", defaults.relay_url_env)
+            ),
+            relay_secret_env=str(
+                health.get("relay_secret_env", defaults.relay_secret_env)
+            ),
+        )
+        config.health.validate()
 
     return config
