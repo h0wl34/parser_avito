@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -26,6 +27,8 @@ def build_handler(
     config: FeedSourcesConfig,
     queue: FeedEventQueue,
     health_store: HealthStore | None = None,
+    *,
+    health_monitor_timeout_seconds: int = 300,
 ) -> Type[BaseHTTPRequestHandler]:
     webhook = config.webhook
     secret = os.environ.get(webhook.secret_env, "")
@@ -39,7 +42,7 @@ def build_handler(
         )
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DealWatcherIngress/2.2"
+        server_version = "DealWatcherIngress/2.3"
 
         def _send(self, status: int, payload: dict) -> None:
             body = _json_bytes(payload)
@@ -52,14 +55,33 @@ def build_handler(
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/healthz":
-                self._send(
-                    200,
-                    {
-                        "status": "ok",
-                        "ingress": webhook.provider,
-                        "queue": queue.stats(),
-                    },
-                )
+                status_code = 200
+                payload = {
+                    "status": "ok",
+                    "ingress": webhook.provider,
+                    "queue": queue.stats(),
+                }
+                if health_store is not None:
+                    heartbeat = health_store.heartbeat("health_monitor")
+                    if heartbeat is None:
+                        status_code = 503
+                        payload["status"] = "degraded"
+                        payload["health_monitor"] = "missing"
+                    else:
+                        age = max(
+                            0.0,
+                            (
+                                datetime.now(timezone.utc) - heartbeat.updated_at
+                            ).total_seconds(),
+                        )
+                        payload["health_monitor_age_seconds"] = round(age)
+                        if age > health_monitor_timeout_seconds:
+                            status_code = 503
+                            payload["status"] = "degraded"
+                            payload["health_monitor"] = "stale"
+                        else:
+                            payload["health_monitor"] = "ok"
+                self._send(status_code, payload)
                 return
             self._send(404, {"error": "not found"})
 
@@ -168,7 +190,17 @@ def main() -> None:
         if deal_config.health.enabled
         else None
     )
-    handler = build_handler(config, queue, health_store)
+    external_health_timeout = max(
+        180,
+        deal_config.health.failure_grace_seconds
+        + deal_config.health.check_interval_seconds * 3,
+    )
+    handler = build_handler(
+        config,
+        queue,
+        health_store,
+        health_monitor_timeout_seconds=external_health_timeout,
+    )
     # Provider retries can arrive in parallel. ThreadingHTTPServer keeps one
     # slow SQLite writer from blocking unrelated health checks/callbacks; SQLite
     # still serializes commits with WAL + busy_timeout underneath.
