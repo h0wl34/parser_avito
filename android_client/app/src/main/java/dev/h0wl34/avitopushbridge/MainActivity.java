@@ -17,6 +17,8 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.ContextCompat;
+
 import org.json.JSONObject;
 
 import java.text.DateFormat;
@@ -72,11 +74,11 @@ public final class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         IntentFilter filter = new IntentFilter(AvitoNotificationListener.ACTION_EVENT_CAPTURED);
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(eventReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(eventReceiver, filter);
-        }
+        ContextCompat.registerReceiver(
+                this,
+                eventReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED);
     }
 
     @Override
