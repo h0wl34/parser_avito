@@ -52,7 +52,7 @@ class JsonlFeedConfig:
 
 @dataclass(slots=True)
 class WebhookIngressConfig:
-    """Local durable ingress for a documented third-party listing webhook."""
+    """Durable ingress for a documented third-party listing webhook."""
 
     enabled: bool = False
     provider: str = "avigram"
@@ -90,7 +90,7 @@ class FeedSourcesConfig:
 
     @property
     def has_enabled_source(self) -> bool:
-        return self.imap.enabled or self.jsonl.enabled
+        return self.imap.enabled or self.jsonl.enabled or self.webhook.enabled
 
     def validate(self) -> None:
         self.imap.validate()
@@ -98,8 +98,6 @@ class FeedSourcesConfig:
         self.webhook.validate()
         if not self.has_enabled_source:
             raise ValueError("at least one feed source must be enabled")
-        if self.webhook.enabled and not self.jsonl.enabled:
-            raise ValueError("webhook ingress requires jsonl.enabled=true for durable spooling")
 
 
 def load_feed_sources_config(
