@@ -51,6 +51,25 @@ def _drain_system_alerts(
         alert = store.claim_alert()
         if alert is None:
             break
+
+        # If an open/repeat alarm could not be delivered while the incident was
+        # active and the system has since recovered, do not send a stale red
+        # alarm after recovery. The queued RECOVERED event remains useful and
+        # carries the incident duration.
+        if alert.kind in {"open", "repeat"}:
+            active_keys = {
+                str(row["incident_key"])
+                for row in store.active_incidents()
+            }
+            if alert.incident_key not in active_keys:
+                store.alert_delivered(alert.alert_id)
+                logger.info(
+                    "system alert superseded after recovery incident={} kind={}",
+                    alert.incident_key,
+                    alert.kind,
+                )
+                continue
+
         ok, detail = sender.send(alert.message)
         if ok:
             store.alert_delivered(alert.alert_id)
