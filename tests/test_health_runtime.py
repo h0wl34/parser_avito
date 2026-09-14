@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import tempfile
+import unittest
+
+from deal_health_monitor import _drain_system_alerts
+from deal_watcher.feed import ListingCandidate
+from deal_watcher.feed_queue import FeedEventQueue
+from deal_watcher.health import HealthStore, queue_health_snapshot
+
+
+UTC = timezone.utc
+
+
+class FakeSender:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def send(self, message: str):
+        self.messages.append(message)
+        return True, "fake"
+
+
+class HealthRuntimeTests(unittest.TestCase):
+    def test_queue_snapshot_reports_dead_and_old_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "test.db"
+            queue = FeedEventQueue(db)
+            t0 = datetime(2026, 9, 14, 8, 0, tzinfo=UTC)
+            first = ListingCandidate(
+                avito_id=1,
+                title="Lenovo Legion 5 RTX 4070",
+                price=99_000,
+                url="https://www.avito.ru/x_1",
+                profile="fast-any-4070",
+                mode="fast",
+                source="test",
+            )
+            queue.enqueue(first, observed_at=t0)
+            event = queue.claim_due(now=t0)
+            queue.dead_letter(event.event_key, error="poison", now=t0)
+
+            second = ListingCandidate(
+                avito_id=2,
+                title="ASUS TUF RTX 4070",
+                price=90_000,
+                url="https://www.avito.ru/x_2",
+                profile="fast-any-4070",
+                mode="fast",
+                source="test",
+            )
+            queue.enqueue(second, observed_at=t0 + timedelta(seconds=20))
+            snapshot = queue_health_snapshot(db, now=t0 + timedelta(seconds=620))
+            self.assertEqual(snapshot.dead, 1)
+            self.assertEqual(snapshot.pending, 1)
+            self.assertAlmostEqual(snapshot.oldest_unfinished_age_seconds, 600, places=0)
+
+    def test_stale_open_alarm_is_not_sent_after_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HealthStore(Path(tmp) / "test.db")
+            sender = FakeSender()
+            t0 = datetime(2026, 9, 14, 8, 0, tzinfo=UTC)
+            store.observe(
+                "telegram_path",
+                healthy=False,
+                severity="CRITICAL",
+                summary="path down",
+                grace_seconds=0,
+                consecutive_required=1,
+                repeat_alert_seconds=3600,
+                now=t0,
+            )
+            store.observe(
+                "telegram_path",
+                healthy=True,
+                severity="CRITICAL",
+                summary="path healthy",
+                grace_seconds=0,
+                consecutive_required=1,
+                repeat_alert_seconds=3600,
+                now=t0 + timedelta(seconds=30),
+            )
+
+            delivered = _drain_system_alerts(store=store, sender=sender)
+            self.assertEqual(delivered, 1)
+            self.assertEqual(len(sender.messages), 1)
+            self.assertIn("RECOVERED", sender.messages[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
