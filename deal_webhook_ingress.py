@@ -3,6 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import threading
 from typing import Type
 
 from loguru import logger
@@ -10,6 +11,7 @@ from loguru import logger
 from deal_watcher import load_deal_watcher_config
 from deal_watcher.feed_config import FeedSourcesConfig, load_feed_sources_config
 from deal_watcher.feed_queue import FeedEventQueue
+from deal_watcher.health import HealthStore
 from deal_watcher.webhook import (
     candidate_from_avigram_payload,
     verify_avigram_signature,
@@ -23,6 +25,7 @@ def _json_bytes(payload: dict) -> bytes:
 def build_handler(
     config: FeedSourcesConfig,
     queue: FeedEventQueue,
+    health_store: HealthStore | None = None,
 ) -> Type[BaseHTTPRequestHandler]:
     webhook = config.webhook
     secret = os.environ.get(webhook.secret_env, "")
@@ -36,7 +39,7 @@ def build_handler(
         )
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DealWatcherIngress/2.1"
+        server_version = "DealWatcherIngress/2.2"
 
         def _send(self, status: int, payload: dict) -> None:
             body = _json_bytes(payload)
@@ -97,6 +100,15 @@ def build_handler(
                     market_name_prefixes=webhook.market_name_prefixes,
                 )
                 inserted = queue.enqueue(candidate)
+                if health_store is not None:
+                    health_store.touch_heartbeat(
+                        "webhook_last_event",
+                        details={
+                            "profile": candidate.profile,
+                            "id": candidate.avito_id,
+                            "queued": inserted,
+                        },
+                    )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as err:
                 logger.warning("Rejected invalid webhook payload: {}", err)
                 self._send(400, {"error": "invalid payload"})
@@ -131,6 +143,18 @@ def build_handler(
     return Handler
 
 
+def _heartbeat_loop(store: HealthStore, stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            store.touch_heartbeat(
+                "webhook_ingress",
+                details={"pid": os.getpid()},
+            )
+        except Exception:
+            logger.exception("could not write webhook ingress heartbeat")
+        stop.wait(30)
+
+
 def main() -> None:
     config = load_feed_sources_config("deal_sources.toml")
     webhook = config.webhook
@@ -139,11 +163,27 @@ def main() -> None:
 
     deal_config = load_deal_watcher_config("deal_watcher.toml")
     queue = FeedEventQueue(deal_config.database_path)
-    handler = build_handler(config, queue)
-    # Provider retries can arrive in parallel.  ThreadingHTTPServer keeps one
+    health_store = (
+        HealthStore(deal_config.database_path)
+        if deal_config.health.enabled
+        else None
+    )
+    handler = build_handler(config, queue, health_store)
+    # Provider retries can arrive in parallel. ThreadingHTTPServer keeps one
     # slow SQLite writer from blocking unrelated health checks/callbacks; SQLite
     # still serializes commits with WAL + busy_timeout underneath.
     server = ThreadingHTTPServer((webhook.bind_host, webhook.port), handler)
+    stop_heartbeat = threading.Event()
+    heartbeat_thread = None
+    if health_store is not None:
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(health_store, stop_heartbeat),
+            name="webhook-health-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
     logger.info(
         "Webhook ingress listening on {}:{}{}; provider={}; queue_db={}",
         webhook.bind_host,
@@ -160,6 +200,9 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Webhook ingress stopped")
     finally:
+        stop_heartbeat.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=2)
         server.server_close()
 
 
