@@ -175,6 +175,7 @@ def run(
         started = time.monotonic()
         now = datetime.now(timezone.utc)
         try:
+            states: dict[str, str] = {}
             store.touch_heartbeat(
                 "health_monitor",
                 details={"pid": os.getpid()},
@@ -187,12 +188,15 @@ def run(
                 timeout_seconds=health.worker_heartbeat_timeout_seconds,
                 now=now,
             )
-            store.observe(
+            # Heartbeat age is already a process-death grace window. Do not add
+            # failure_grace_seconds a second time; consecutive stale samples
+            # still debounce short restart/reboot gaps.
+            states["feed_worker"] = store.observe(
                 "feed_worker",
                 healthy=worker_ok,
                 severity="CRITICAL",
                 summary=worker_summary,
-                grace_seconds=health.failure_grace_seconds,
+                grace_seconds=0,
                 consecutive_required=health.consecutive_failures,
                 repeat_alert_seconds=health.repeat_alert_seconds,
                 now=now,
@@ -205,19 +209,19 @@ def run(
                     timeout_seconds=health.ingress_heartbeat_timeout_seconds,
                     now=now,
                 )
-                store.observe(
+                states["webhook_ingress"] = store.observe(
                     "webhook_ingress",
                     healthy=ingress_ok,
                     severity="CRITICAL",
                     summary=ingress_summary,
-                    grace_seconds=health.failure_grace_seconds,
+                    grace_seconds=0,
                     consecutive_required=health.consecutive_failures,
                     repeat_alert_seconds=health.repeat_alert_seconds,
                     now=now,
                 )
 
             snapshot = queue_health_snapshot(config.database_path, now=now)
-            store.observe(
+            states["dead_letter"] = store.observe(
                 "dead_letter",
                 healthy=snapshot.dead < health.dead_letter_critical,
                 severity="CRITICAL",
@@ -239,7 +243,7 @@ def run(
                 and oldest > health.queue_oldest_pending_seconds
                 and (snapshot.pending + snapshot.processing) > 0
             )
-            store.observe(
+            states["queue_stalled"] = store.observe(
                 "queue_stalled",
                 healthy=not queue_stalled,
                 severity="CRITICAL",
@@ -256,7 +260,7 @@ def run(
             )
 
             queue_large = snapshot.pending >= health.queue_pending_warning
-            store.observe(
+            states["queue_backlog"] = store.observe(
                 "queue_backlog",
                 healthy=not queue_large,
                 severity="WARNING",
@@ -276,7 +280,7 @@ def run(
             disk_severity = (
                 "CRITICAL" if free_mb < health.disk_free_critical_mb else "WARNING"
             )
-            store.observe(
+            states["disk_space"] = store.observe(
                 "disk_space",
                 healthy=not disk_bad,
                 severity=disk_severity,
@@ -295,7 +299,7 @@ def run(
             if mono - last_telegram_probe >= health.telegram_probe_seconds:
                 tg_ok, tg_summary = sender.probe_primary_telegram()
                 last_telegram_probe = mono
-                store.observe(
+                states["telegram_path"] = store.observe(
                     "telegram_path",
                     healthy=tg_ok,
                     severity="CRITICAL",
@@ -309,7 +313,7 @@ def run(
             if sender.relay_url and mono - last_relay_probe >= 300:
                 relay_ok, relay_summary = _probe_emergency_relay(sender)
                 last_relay_probe = mono
-                store.observe(
+                states["emergency_relay"] = store.observe(
                     "emergency_relay",
                     healthy=relay_ok,
                     severity="WARNING",
@@ -322,7 +326,7 @@ def run(
 
             if mono - last_db_check >= 3600:
                 db_ok, db_summary = _quick_check(config.database_path)
-                store.observe(
+                states["database_integrity"] = store.observe(
                     "database_integrity",
                     healthy=db_ok,
                     severity="CRITICAL",
@@ -337,11 +341,24 @@ def run(
             _drain_system_alerts(store=store, sender=sender)
 
             if mono - last_health_log >= 300:
-                logger.info(
-                    "health ok; queue={} active_incidents={}",
-                    snapshot,
-                    len(store.active_incidents()),
-                )
+                active = store.active_incidents()
+                degraded = {
+                    key: value
+                    for key, value in states.items()
+                    if value not in {"healthy", "recovered"}
+                }
+                if active or degraded:
+                    logger.warning(
+                        "health degraded; states={} queue={} active_incidents={}",
+                        degraded,
+                        snapshot,
+                        len(active),
+                    )
+                else:
+                    logger.info(
+                        "health ok; queue={} active_incidents=0",
+                        snapshot,
+                    )
                 last_health_log = mono
 
         except KeyboardInterrupt:
