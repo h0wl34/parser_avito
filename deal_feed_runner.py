@@ -17,6 +17,10 @@ from integrations.notifications.factory import build_notifier
 from load_config import load_avito_config
 
 
+class NotificationDeliveryError(RuntimeError):
+    """A high-value feed event could not be delivered to any notifier."""
+
+
 class FeedProcessor:
     def __init__(self, *, avito_config_path: str, deal_config_path: str):
         self.base_config = load_avito_config(avito_config_path)
@@ -43,8 +47,8 @@ class FeedProcessor:
             source_url=f"feed:{candidate.source}:{candidate.profile}",
             baseline_eligible=candidate.baseline_eligible,
         )
-        store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
         if analysis is None:
+            store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
             logger.warning(
                 "feed skipped unscorable listing profile={} id={}",
                 candidate.profile,
@@ -64,11 +68,24 @@ class FeedProcessor:
             candidate.title,
         )
 
-        if candidate.mode == "fast" and self.service.should_notify(analysis):
+        should_notify = (
+            candidate.mode == "fast" and self.service.should_notify(analysis)
+        )
+        if should_notify:
             # Feed events intentionally send text only. Fetching an image from
             # Avito would turn a zero-request acquisition path into an extra
             # direct request and defeats the architecture.
-            self.notifier.notify(message=format_deal_markdown(item, analysis))
+            delivered = self.notifier.notify(
+                message=format_deal_markdown(item, analysis)
+            )
+            if delivered is False:
+                # Do not acknowledge the event. JSONL keeps its cursor on this
+                # line; IMAP keeps the email unread, so the alert is retried.
+                raise NotificationDeliveryError(
+                    f"all notification backends failed for listing {candidate.avito_id}"
+                )
+
+            store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
             logger.info(
                 "feed notification sent profile={} id={} score={}",
                 candidate.profile,
@@ -76,6 +93,8 @@ class FeedProcessor:
                 analysis.score,
             )
             return True
+
+        store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
         return False
 
 
@@ -114,16 +133,36 @@ def _run_jsonl_once(
             line = fh.readline()
             if not line:
                 break
+
             try:
                 candidates = list(candidates_from_json_lines([line]))
+            except Exception as err:
+                # Malformed input is consumed so one bad external event cannot
+                # poison the durable feed forever.
+                logger.error(
+                    "invalid JSONL feed event at byte {}: {}",
+                    line_start,
+                    err,
+                )
+                offsets[key] = fh.tell()
+                continue
+
+            try:
                 for candidate in candidates:
                     processor.process(candidate)
                     processed += 1
             except Exception as err:
-                # A bad event must not poison the whole feed. It is consumed and
-                # logged with its byte offset, but credentials/content are not.
-                logger.error("invalid JSONL feed event at byte {}: {}", line_start, err)
-        offsets[key] = fh.tell()
+                # Processing/delivery failure is different from malformed input:
+                # keep the cursor on the current line and retry it next cycle.
+                offsets[key] = line_start
+                logger.error(
+                    "feed event processing failed at byte {}; will retry: {}",
+                    line_start,
+                    err,
+                )
+                return processed
+
+            offsets[key] = fh.tell()
     return processed
 
 
@@ -194,6 +233,8 @@ def _run_imap_once(
                 processor.process(candidate)
                 processed += 1
 
+            # Only acknowledge the email after all its listing events have been
+            # processed (including any required Telegram delivery).
             if source.mark_seen:
                 conn.uid("store", uid, "+FLAGS", "(\\Seen)")
     return processed
