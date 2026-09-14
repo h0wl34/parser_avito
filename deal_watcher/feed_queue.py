@@ -19,8 +19,24 @@ class QueuedFeedEvent:
 
 
 def candidate_event_key(candidate: ListingCandidate) -> str:
-    """Stable dedupe key across providers/retries for one profile observation."""
-    raw = f"{candidate.profile}\0{candidate.avito_id}\0{candidate.price}".encode("utf-8")
+    """Stable dedupe key for one concrete listing revision.
+
+    Provider retries with identical normalized content collapse to one event,
+    while title/description edits at the same price are allowed through for
+    re-scoring.  ``source`` is intentionally excluded so the same observation
+    arriving through two adapters does not duplicate work.
+    """
+    raw = "\0".join(
+        (
+            candidate.profile,
+            str(candidate.avito_id),
+            str(candidate.price),
+            candidate.title,
+            candidate.description,
+            candidate.url,
+            candidate.seller_id or "",
+        )
+    ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -34,8 +50,9 @@ def _candidate_json(candidate: ListingCandidate) -> str:
 class FeedEventQueue:
     """SQLite-backed at-least-once queue shared by ingress and worker.
 
-    Provider retries are deduplicated by (profile, listing id, price). A worker
-    claim has a lease, so a process crash cannot strand an event forever.
+    Identical provider retries are deduplicated by a normalized content hash.
+    A worker claim has a lease, so a process crash cannot strand an event
+    forever.
     """
 
     def __init__(self, db_path: str | Path):
