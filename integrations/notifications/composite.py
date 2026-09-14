@@ -13,12 +13,12 @@ class CompositeNotifier(Notifier):
 
         Historically this method swallowed every backend exception and returned
         None, so callers could not distinguish a successful notification from a
-        complete delivery failure.  Returning a boolean is backward compatible
+        complete delivery failure. Returning a boolean is backward compatible
         for existing callers that ignore the return value and lets durable
         consumers avoid acknowledging an event too early.
         """
         if not self.notifiers:
-            return True
+            return False
 
         delivered = False
         for notifier in self.notifiers:
@@ -34,4 +34,6 @@ class CompositeNotifier(Notifier):
 
 class NullNotifier(Notifier):
     def notify(self, ad: Item = None, message: str = None):
-        return True
+        # A no-op is not a successful delivery. Durable consumers must keep a
+        # valuable event pending until a real notifier is configured.
+        return False
