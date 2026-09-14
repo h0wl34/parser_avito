@@ -12,6 +12,7 @@ from loguru import logger
 from deal_watcher import DealWatcherService, load_deal_watcher_config
 from deal_watcher.feed import ListingCandidate, candidates_from_email, candidates_from_json_lines
 from deal_watcher.feed_config import FeedSourcesConfig, load_feed_sources_config
+from deal_watcher.feed_queue import FeedEventQueue
 from deal_watcher.formatter import format_deal_markdown
 from deal_watcher.jsonl_queue import file_identity, iter_complete_records
 from integrations.notifications.factory import build_notifier
@@ -80,12 +81,13 @@ class FeedProcessor:
                 message=format_deal_markdown(item, analysis)
             )
             if delivered is False:
-                # Do not acknowledge the event. JSONL keeps its durable cursor
-                # on this line; IMAP keeps the email unread, so the alert retries.
                 raise NotificationDeliveryError(
                     f"all notification backends failed for listing {candidate.avito_id}"
                 )
 
+            # There is an unavoidable tiny at-least-once window between the
+            # remote Telegram ACK and this local mark. A crash in exactly that
+            # interval can duplicate an alert, but it cannot silently lose one.
             store.mark_seen(candidate.profile, [(candidate.avito_id, candidate.price)])
             logger.info(
                 "feed notification sent profile={} id={} score={}",
@@ -104,11 +106,13 @@ def _ensure_feed_file(path: Path) -> None:
     path.touch(exist_ok=True)
 
 
-def _run_jsonl_once(
+def _ingest_jsonl_once(
     *,
     config: FeedSourcesConfig,
     processor: FeedProcessor,
+    queue: FeedEventQueue,
 ) -> int:
+    """Move complete JSONL records into the durable SQLite event queue."""
     source = config.jsonl
     if not source.enabled:
         return 0
@@ -120,13 +124,11 @@ def _run_jsonl_once(
     identity = file_identity(path)
     size = path.stat().st_size
 
-    checkpoint = processor.service.store.get_feed_cursor(source_key)
+    store = processor.service.store
+    checkpoint = store.get_feed_cursor(source_key)
     if checkpoint is None:
         offset = size if source.start_at_end else 0
-        # Persist even the initial end-of-file bootstrap. Otherwise every
-        # restart with start_at_end=true would skip events appended since the
-        # previous process started.
-        processor.service.store.save_feed_cursor(source_key, identity, offset)
+        store.save_feed_cursor(source_key, identity, offset)
     else:
         checkpoint_identity, offset = checkpoint
         if checkpoint_identity != identity:
@@ -134,51 +136,43 @@ def _run_jsonl_once(
                 "JSONL feed file was replaced/rotated; restarting new file at byte 0"
             )
             offset = 0
-            processor.service.store.save_feed_cursor(source_key, identity, offset)
+            store.save_feed_cursor(source_key, identity, offset)
         elif size < offset:
             logger.warning("JSONL feed was truncated; restarting at byte 0")
             offset = 0
-            processor.service.store.save_feed_cursor(source_key, identity, offset)
+            store.save_feed_cursor(source_key, identity, offset)
 
-    processed = 0
+    ingested = 0
     for record in iter_complete_records(path, offset=offset):
         try:
             candidates = list(candidates_from_json_lines([record.line]))
         except Exception as err:
-            # A complete but malformed record is poison input: log it and move
-            # past it.  Incomplete final records never reach this branch.
+            # A complete but malformed record is poison input. Incomplete final
+            # records are not yielded by iter_complete_records at all.
             logger.error(
                 "invalid JSONL feed event at byte {}: {}",
                 record.start_offset,
                 err,
             )
-            processor.service.store.save_feed_cursor(
-                source_key,
-                identity,
-                record.end_offset,
-            )
+            store.save_feed_cursor(source_key, identity, record.end_offset)
             continue
 
         try:
             for candidate in candidates:
-                processor.process(candidate)
-                processed += 1
+                queue.enqueue(candidate)
+                ingested += 1
         except Exception as err:
-            # Processing/delivery failure is retryable.  Crucially, do NOT move
-            # the durable cursor; a restart will replay the same event.
+            # Queue commit failed: do not move the source cursor. The record is
+            # retried after restart/next cycle.
             logger.error(
-                "feed event processing failed at byte {}; will retry: {}",
+                "could not durably enqueue JSONL event at byte {}; will retry: {}",
                 record.start_offset,
                 err,
             )
-            return processed
+            return ingested
 
-        processor.service.store.save_feed_cursor(
-            source_key,
-            identity,
-            record.end_offset,
-        )
-    return processed
+        store.save_feed_cursor(source_key, identity, record.end_offset)
+    return ingested
 
 
 def _imap_credentials(config: FeedSourcesConfig) -> tuple[str, str]:
@@ -192,17 +186,18 @@ def _imap_credentials(config: FeedSourcesConfig) -> tuple[str, str]:
     return username, password
 
 
-def _run_imap_once(
+def _ingest_imap_once(
     *,
     config: FeedSourcesConfig,
-    processor: FeedProcessor,
+    queue: FeedEventQueue,
 ) -> int:
+    """Move parseable notification emails into the durable SQLite queue."""
     source = config.imap
     if not source.enabled:
         return 0
 
     username, password = _imap_credentials(config)
-    processed = 0
+    ingested = 0
     with imaplib.IMAP4_SSL(source.host, source.port, timeout=30) as conn:
         conn.login(username, password)
         status, _ = conn.select(source.folder)
@@ -239,9 +234,6 @@ def _run_imap_once(
                 source="imap",
             )
             if not candidates:
-                # Never acknowledge an unparseable notification.  A provider
-                # template change must be visible instead of silently losing a
-                # potentially valuable listing.
                 logger.error(
                     "IMAP notification uid={} contained no reliably parseable listing; "
                     "leaving it unread for investigation",
@@ -249,14 +241,84 @@ def _run_imap_once(
                 )
                 continue
 
-            for candidate in candidates:
-                processor.process(candidate)
-                processed += 1
+            try:
+                for candidate in candidates:
+                    queue.enqueue(candidate)
+                    ingested += 1
+            except Exception:
+                # No email ACK unless every candidate is durably in SQLite.
+                logger.exception(
+                    "could not durably enqueue IMAP uid={}; leaving unread",
+                    uid.decode(errors="ignore"),
+                )
+                continue
 
-            # Only acknowledge the email after all its listing events have been
-            # processed (including any required Telegram delivery).
             if source.mark_seen:
                 conn.uid("store", uid, "+FLAGS", "(\\Seen)")
+    return ingested
+
+
+def _retry_delay(attempts: int) -> int:
+    # Fast first retries matter for a bargain alert; prolonged outages back off
+    # to five minutes so Telegram failures cannot spin the worker.
+    schedule = (5, 15, 30, 60, 120, 300)
+    return schedule[min(max(1, attempts), len(schedule)) - 1]
+
+
+def _drain_queue_once(
+    *,
+    processor: FeedProcessor,
+    queue: FeedEventQueue,
+    max_events: int = 50,
+) -> int:
+    processed = 0
+    for _ in range(max(1, max_events)):
+        event = queue.claim_due(lease_seconds=120)
+        if event is None:
+            break
+
+        try:
+            processor.process(event.candidate)
+        except NotificationDeliveryError as err:
+            delay = _retry_delay(event.attempts)
+            queue.retry(
+                event.event_key,
+                error=str(err),
+                delay_seconds=delay,
+            )
+            logger.warning(
+                "notification delivery failed event={} attempt={}; retry in {}s",
+                event.event_key[:12],
+                event.attempts,
+                delay,
+            )
+        except Exception as err:
+            # Valid normalized events should rarely fail deterministically. Give
+            # them several retries, then isolate poison data instead of letting
+            # one event churn forever.
+            if event.attempts >= 10:
+                queue.dead_letter(event.event_key, error=str(err))
+                logger.exception(
+                    "feed event={} moved to dead-letter after {} attempts",
+                    event.event_key[:12],
+                    event.attempts,
+                )
+            else:
+                delay = min(900, 15 * (2 ** min(event.attempts - 1, 6)))
+                queue.retry(
+                    event.event_key,
+                    error=str(err),
+                    delay_seconds=delay,
+                )
+                logger.exception(
+                    "feed event={} attempt={} failed; retry in {}s",
+                    event.event_key[:12],
+                    event.attempts,
+                    delay,
+                )
+        else:
+            queue.ack(event.event_key)
+            processed += 1
     return processed
 
 
@@ -271,6 +333,7 @@ def run(
         avito_config_path=avito_config_path,
         deal_config_path=deal_config_path,
     )
+    queue = FeedEventQueue(processor.deal_config.database_path)
     _imap_credentials(sources)
 
     enabled = []
@@ -278,6 +341,8 @@ def run(
         enabled.append(f"jsonl:{sources.jsonl.path}")
     if sources.imap.enabled:
         enabled.append(f"imap:{sources.imap.host}/{sources.imap.folder}")
+    if sources.webhook.enabled:
+        enabled.append(f"webhook-queue:{sources.webhook.provider}")
     logger.info(
         "Deal Feed Runner started; sources={}; direct Avito requests=0",
         ", ".join(enabled),
@@ -285,25 +350,45 @@ def run(
 
     last_jsonl = 0.0
     last_imap = 0.0
+    last_health = 0.0
+    last_prune = 0.0
     while True:
         now = time.monotonic()
         did_work = False
         try:
             if sources.jsonl.enabled and now - last_jsonl >= sources.jsonl.poll_seconds:
                 did_work = bool(
-                    _run_jsonl_once(config=sources, processor=processor)
+                    _ingest_jsonl_once(
+                        config=sources,
+                        processor=processor,
+                        queue=queue,
+                    )
                 ) or did_work
                 last_jsonl = now
 
             if sources.imap.enabled and now - last_imap >= sources.imap.poll_seconds:
                 did_work = bool(
-                    _run_imap_once(config=sources, processor=processor)
+                    _ingest_imap_once(config=sources, queue=queue)
                 ) or did_work
                 last_imap = now
+
+            did_work = bool(
+                _drain_queue_once(processor=processor, queue=queue)
+            ) or did_work
+
+            if now - last_health >= 60:
+                logger.info("feed queue stats={}", queue.stats())
+                last_health = now
+
+            if now - last_prune >= 86_400:
+                removed = queue.prune_done(keep_days=14)
+                if removed:
+                    logger.info("pruned {} old completed feed events", removed)
+                last_prune = now
         except KeyboardInterrupt:
             raise
         except Exception:
-            logger.exception("feed source iteration failed; retrying without touching Avito")
+            logger.exception("feed iteration failed; retrying without touching Avito")
 
         time.sleep(0.25 if did_work else 1.0)
 
