@@ -4,7 +4,6 @@ import re
 
 from .models import Condition, LaptopSpecs, RiskAssessment
 
-
 _BRANDS = {
     "asus": "ASUS",
     "lenovo": "Lenovo",
@@ -21,7 +20,8 @@ _FAMILY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bthinkbook\s*16\s*\+", re.I), "ThinkBook 16+"),
     (re.compile(r"\bthinkbook\s*16p\b", re.I), "ThinkBook 16p"),
     (re.compile(r"\blegion\s*(?:pro\s*)?7\b", re.I), "Legion 7"),
-    (re.compile(r"\blegion\s*(?:slim\s*)?5\b", re.I), "Legion 5"),
+    (re.compile(r"\blegion\s*(?:(?:pro|slim)\s*)?5\b", re.I), "Legion 5"),
+    (re.compile(r"\b(?:rog\s*)?strix(?:\s+scar)?\b", re.I), "ROG Strix"),
     (re.compile(r"\b(?:rog\s*)?zephyrus\b", re.I), "ROG Zephyrus"),
     (re.compile(r"\byoga\s*pro\b", re.I), "Yoga Pro"),
     (re.compile(r"\bproart\b", re.I), "ProArt"),
