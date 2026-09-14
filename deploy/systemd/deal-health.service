@@ -1,8 +1,8 @@
 [Unit]
 Description=Laptop Deal Watcher health monitor
-Wants=network-online.target
+Wants=network-online.target deal-relay-tunnel.service
 After=network-online.target
-After=deal-feed.service
+After=deal-feed.service deal-relay-tunnel.service
 
 [Service]
 Type=simple
