@@ -3,6 +3,9 @@ enabled = true
 notify_score = 80
 market_window_days = 30
 min_market_samples = 5
+# Prevent an old Telegram/outage backlog from flooding after recovery. Events are
+# still analyzed/stored, but FAST delivery is suppressed after this queue age.
+max_fast_event_age_seconds = 7200
 database_path = "database.db"
 
 [safety]
