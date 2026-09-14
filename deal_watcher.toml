@@ -25,10 +25,35 @@ max_cooldown_after_block_seconds = 604800
 block_backoff_multiplier = 2.0
 block_statuses = [403, 429, 439]
 
+[health]
+enabled = true
+# A single timeout should not wake the user. Persistent failures must survive
+# both the minimum time window and the consecutive-check threshold.
+check_interval_seconds = 30
+failure_grace_seconds = 120
+consecutive_failures = 3
+# While an incident stays active, remind at most once every six hours.
+repeat_alert_seconds = 21600
+worker_heartbeat_timeout_seconds = 150
+ingress_heartbeat_timeout_seconds = 150
+telegram_probe_seconds = 60
+# Queue/dead-letter health thresholds.
+queue_oldest_pending_seconds = 600
+queue_pending_warning = 25
+dead_letter_critical = 1
+# Disk thresholds are MiB.
+disk_free_warning_mb = 1024
+disk_free_critical_mb = 256
+# Emergency relay connection details are read from environment variables, never
+# committed to TOML. The relay is independent of the normal SOCKS notifier.
+relay_url_env = "DEAL_ALERT_RELAY_URL"
+relay_secret_env = "DEAL_ALERT_RELAY_SECRET"
+
 [series_bonus]
 "ThinkBook 16+" = 15
 "ThinkBook 16p" = 15
 "ROG Zephyrus" = 15
+"ROG Strix" = 12
 "Yoga Pro" = 14
 "ProArt" = 14
 "Legion 7" = 12
