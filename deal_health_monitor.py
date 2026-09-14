@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import sqlite3
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from loguru import logger
+import requests
 
 from deal_watcher import load_deal_watcher_config
 from deal_watcher.feed_config import load_feed_sources_config
@@ -38,6 +40,23 @@ def _heartbeat_observation(
             f"(limit {timeout_seconds}s)",
         )
     return True, f"{service} heartbeat healthy ({int(age)}s old)"
+
+
+def _relay_health_url(alert_url: str) -> str:
+    parts = urlsplit(alert_url)
+    return urlunsplit((parts.scheme, parts.netloc, "/healthz", "", ""))
+
+
+def _probe_emergency_relay(sender: SystemAlertSender) -> tuple[bool, str]:
+    if not sender.relay_url:
+        return False, "Emergency relay is not configured"
+    try:
+        response = requests.get(_relay_health_url(sender.relay_url), timeout=8)
+        if 200 <= response.status_code < 300:
+            return True, "Emergency relay is reachable"
+        return False, f"Emergency relay HTTP {response.status_code}"
+    except requests.RequestException as err:
+        return False, f"Emergency relay failed: {type(err).__name__}"
 
 
 def _drain_system_alerts(
@@ -148,7 +167,7 @@ def run(
     )
 
     last_telegram_probe = 0.0
-    last_telegram_result: tuple[bool, str] | None = None
+    last_relay_probe = 0.0
     last_db_check = 0.0
     last_health_log = 0.0
 
@@ -274,9 +293,8 @@ def run(
 
             mono = time.monotonic()
             if mono - last_telegram_probe >= health.telegram_probe_seconds:
-                last_telegram_result = sender.probe_primary_telegram()
+                tg_ok, tg_summary = sender.probe_primary_telegram()
                 last_telegram_probe = mono
-                tg_ok, tg_summary = last_telegram_result
                 store.observe(
                     "telegram_path",
                     healthy=tg_ok,
@@ -284,6 +302,20 @@ def run(
                     summary=tg_summary,
                     grace_seconds=health.failure_grace_seconds,
                     consecutive_required=health.consecutive_failures,
+                    repeat_alert_seconds=health.repeat_alert_seconds,
+                    now=now,
+                )
+
+            if sender.relay_url and mono - last_relay_probe >= 300:
+                relay_ok, relay_summary = _probe_emergency_relay(sender)
+                last_relay_probe = mono
+                store.observe(
+                    "emergency_relay",
+                    healthy=relay_ok,
+                    severity="WARNING",
+                    summary=relay_summary,
+                    grace_seconds=300,
+                    consecutive_required=2,
                     repeat_alert_seconds=health.repeat_alert_seconds,
                     now=now,
                 )
