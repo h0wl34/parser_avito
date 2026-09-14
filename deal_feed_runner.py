@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 import imaplib
@@ -32,7 +33,12 @@ class FeedProcessor:
         self.service = DealWatcherService(self.deal_config)
         self.notifier = build_notifier(self.base_config)
 
-    def process(self, candidate: ListingCandidate) -> bool:
+    def process(
+        self,
+        candidate: ListingCandidate,
+        *,
+        allow_notify: bool = True,
+    ) -> bool:
         store = self.service.store
         # On the feed path deal_seen means "an alert for this profile/id/price
         # was successfully delivered", not merely "some revision was analyzed".
@@ -74,7 +80,9 @@ class FeedProcessor:
         )
 
         should_notify = (
-            candidate.mode == "fast" and self.service.should_notify(analysis)
+            allow_notify
+            and candidate.mode == "fast"
+            and self.service.should_notify(analysis)
         )
         if should_notify:
             # Feed events intentionally send text only. Fetching an image from
@@ -100,8 +108,21 @@ class FeedProcessor:
             )
             return True
 
-        # Do not mark low-scoring/MARKET events as alerted. Their queue event is
-        # ACKed by the worker, while a later edited revision can still be scored.
+        if (
+            not allow_notify
+            and candidate.mode == "fast"
+            and self.service.should_notify(analysis)
+        ):
+            logger.warning(
+                "stale FAST alert suppressed profile={} id={} score={}",
+                candidate.profile,
+                candidate.avito_id,
+                analysis.score,
+            )
+
+        # Do not mark low-scoring/MARKET/stale events as alerted. Their queue
+        # event is ACKed by the worker, while a later fresh revision can still
+        # be scored and delivered.
         return False
 
 
@@ -281,8 +302,25 @@ def _drain_queue_once(
         if event is None:
             break
 
+        now = datetime.now(timezone.utc)
+        max_age = processor.deal_config.max_fast_event_age_seconds
+        queue_age = max(0.0, (now - event.created_at).total_seconds())
+        allow_notify = not (
+            event.candidate.mode == "fast"
+            and max_age > 0
+            and queue_age > max_age
+        )
+        if not allow_notify:
+            logger.warning(
+                "FAST event too old for alert delivery event={} profile={} queue_age={:.0f}s max={}s",
+                event.event_key[:12],
+                event.candidate.profile,
+                queue_age,
+                max_age,
+            )
+
         try:
-            processor.process(event.candidate)
+            processor.process(event.candidate, allow_notify=allow_notify)
         except NotificationDeliveryError as err:
             delay = _retry_delay(event.attempts)
             queue.retry(
