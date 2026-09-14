@@ -1,9 +1,10 @@
 # Production-safe acquisition sources for Laptop Deal Watcher.
-# These sources feed listing events into scoring without polling Avito.
+# Sources only ingest listing events. The durable queue lives in database.db;
+# deal_feed_runner.py consumes that queue and performs scoring/notifications.
 
 [jsonl]
-# Durable integration spool. deal_feed_runner.py tails this file and deduplicates
-# by profile, listing id and price.
+# Optional generic/manual adapter. Complete JSONL lines are checkpointed and
+# copied into the durable SQLite queue. Partial final writes are never consumed.
 enabled = true
 path = "deal_feed.jsonl"
 poll_seconds = 2
@@ -11,8 +12,11 @@ start_at_end = false
 
 [webhook]
 # Optional high-speed ingress for Avigram's documented callback API.
-# Keep this bound to localhost and expose it through your normal TLS reverse
-# proxy. The callback secret is read from AVIGRAM_CALLBACK_SECRET, not TOML.
+# Webhook events are committed DIRECTLY to the SQLite queue before HTTP 202 is
+# returned; JSONL is not required for webhook durability.
+#
+# Keep this bound to localhost and expose it through a TLS reverse proxy. The
+# callback secret is read from AVIGRAM_CALLBACK_SECRET, never from this file.
 enabled = false
 provider = "avigram"
 bind_host = "127.0.0.1"
@@ -22,13 +26,14 @@ require_signature = true
 secret_env = "AVIGRAM_CALLBACK_SECRET"
 max_skew_seconds = 300
 max_body_bytes = 1048576
-# Name Avigram searches like fast-any-4070 / market-new-4070. Searches whose
-# name begins with one of these prefixes become silent MARKET baseline events.
+# Name searches like fast-any-4070 / market-new-4070. Searches whose name
+# begins with one of these prefixes become silent MARKET baseline events.
 market_name_prefixes = ["market-", "market_", "market "]
 
 [imap]
 # Optional fallback: ingest listing links from saved-search notification emails.
 # Credentials are NEVER stored here; set the named environment variables.
+# Email is marked Seen only after all parsed candidates are committed to SQLite.
 enabled = false
 host = "imap.example.com"
 port = 993
@@ -45,8 +50,10 @@ mark_seen = true
 # {"id": 1234567890, "title": "Lenovo Legion RTX 4070", "price": 99000,
 #  "url": "https://www.avito.ru/moskva/noutbuki/..._1234567890",
 #  "description": "optional", "profile": "fast-any-4070", "mode": "fast",
-#  "source": "my-feed", "published_at": "2026-09-13T12:30:00+03:00"}
+#  "source": "my-feed", "published_at": "2026-09-14T09:30:00+03:00"}
 #
-# Set mode="market" for silent observations that are allowed into the dynamic
-# market baseline. FAST events can trigger Telegram notifications; MARKET events
-# never do.
+# mode="market": silent observation eligible for the dynamic market baseline.
+# mode="fast": can trigger Telegram when score >= notify_score.
+#
+# Once webhook/IMAP is your real source, JSONL may be disabled. Keeping it
+# enabled is useful for manual smoke tests and custom integrations.
