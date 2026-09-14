@@ -48,8 +48,8 @@ class FeedQueueTests(unittest.TestCase):
     def test_claim_has_lease_and_expired_processing_event_is_recovered(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = FeedEventQueue(Path(tmp) / "test.db")
-            queue.enqueue(candidate())
             now = datetime(2026, 9, 14, 7, 0, tzinfo=UTC)
+            queue.enqueue(candidate(), observed_at=now)
 
             first = queue.claim_due(now=now, lease_seconds=60)
             self.assertIsNotNone(first)
@@ -69,8 +69,8 @@ class FeedQueueTests(unittest.TestCase):
     def test_retry_respects_next_attempt_and_ack_finishes_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = FeedEventQueue(Path(tmp) / "test.db")
-            queue.enqueue(candidate())
             now = datetime(2026, 9, 14, 7, 0, tzinfo=UTC)
+            queue.enqueue(candidate(), observed_at=now)
             event = queue.claim_due(now=now)
             self.assertIsNotNone(event)
 
