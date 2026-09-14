@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+from pathlib import Path
+import tempfile
+import unittest
+
+from deal_feed_runner import FeedProcessor, NotificationDeliveryError, _drain_queue_once
+from deal_watcher.config import DealWatcherConfig
+from deal_watcher.feed import ListingCandidate
+from deal_watcher.feed_queue import FeedEventQueue
+from deal_watcher.service import DealWatcherService
+
+
+class FakeNotifier:
+    def __init__(self, result=True):
+        self.result = result
+        self.messages: list[str] = []
+
+    def notify(self, ad=None, message=None):
+        self.messages.append(message or "")
+        return self.result
+
+
+class FeedProcessorAcceptanceTests(unittest.TestCase):
+    def _processor(self, db_path: Path, *, notify_score: int = 80):
+        processor = FeedProcessor.__new__(FeedProcessor)
+        processor.deal_config = DealWatcherConfig(
+            enabled=True,
+            notify_score=notify_score,
+            database_path=str(db_path),
+        )
+        processor.service = DealWatcherService(processor.deal_config)
+        processor.notifier = FakeNotifier(True)
+        return processor
+
+    @staticmethod
+    def _candidate(
+        *,
+        avito_id=1234567890,
+        price=99_000,
+        profile="fast-any-4070",
+        mode="fast",
+    ):
+        return ListingCandidate(
+            avito_id=avito_id,
+            title="Lenovo Legion 5 RTX 4070 32GB 1TB",
+            price=price,
+            url=f"https://www.avito.ru/moskva/noutbuki/legion_{avito_id}",
+            profile=profile,
+            mode=mode,
+            source="acceptance",
+        )
+
+    def test_cold_start_strong_deal_reaches_notification_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db")
+            candidate = self._candidate()
+            delivered = processor.process(candidate)
+            self.assertTrue(delivered)
+            self.assertEqual(len(processor.notifier.messages), 1)
+            self.assertIn("80/100", processor.notifier.messages[0])
+            self.assertIn(candidate.url, processor.notifier.messages[0])
+
+    def test_delivery_failure_does_not_mark_seen_and_retry_can_deliver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db")
+            candidate = self._candidate()
+            processor.notifier = FakeNotifier(False)
+
+            with self.assertRaises(NotificationDeliveryError):
+                processor.process(candidate)
+            self.assertFalse(
+                processor.service.store.is_seen(
+                    candidate.profile, candidate.avito_id, candidate.price
+                )
+            )
+
+            processor.notifier = FakeNotifier(True)
+            self.assertTrue(processor.process(candidate))
+            self.assertTrue(
+                processor.service.store.is_seen(
+                    candidate.profile, candidate.avito_id, candidate.price
+                )
+            )
+
+    def test_duplicate_same_profile_id_price_does_not_notify_twice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db")
+            candidate = self._candidate()
+            self.assertTrue(processor.process(candidate))
+            self.assertFalse(processor.process(candidate))
+            self.assertEqual(len(processor.notifier.messages), 1)
+
+    def test_price_change_is_new_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db", notify_score=0)
+            first = self._candidate(price=110_000)
+            second = self._candidate(price=99_000)
+            processor.process(first)
+            processor.process(second)
+            self.assertEqual(len(processor.notifier.messages), 2)
+            self.assertTrue(
+                processor.service.store.is_seen(
+                    second.profile, second.avito_id, second.price
+                )
+            )
+
+    def test_market_event_is_silent_and_enters_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db")
+            candidate = self._candidate(
+                profile="market-new-4070",
+                mode="market",
+            )
+            self.assertFalse(processor.process(candidate))
+            self.assertEqual(processor.notifier.messages, [])
+            specs = processor.service.analyze_item(
+                self._candidate(avito_id=999, price=120_000).to_item(),
+                baseline_eligible=False,
+            ).specs
+            stats = processor.service.store.market_stats(specs, min_samples=1)
+            self.assertEqual(stats.sample_size, 1)
+            self.assertEqual(stats.median_price, 99_000)
+
+    def test_same_listing_fast_then_market_remains_independent_by_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processor = self._processor(Path(tmp) / "test.db")
+            fast = self._candidate()
+            market = self._candidate(profile="market-new-4070", mode="market")
+            self.assertTrue(processor.process(fast))
+            self.assertFalse(processor.process(market))
+            self.assertTrue(
+                processor.service.store.is_seen(
+                    fast.profile, fast.avito_id, fast.price
+                )
+            )
+            self.assertTrue(
+                processor.service.store.is_seen(
+                    market.profile, market.avito_id, market.price
+                )
+            )
+            self.assertEqual(len(processor.notifier.messages), 1)
+
+    def test_queue_keeps_event_pending_when_notification_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "test.db"
+            processor = self._processor(db)
+            processor.notifier = FakeNotifier(False)
+            queue = FeedEventQueue(db)
+            queue.enqueue(self._candidate())
+
+            self.assertEqual(_drain_queue_once(processor=processor, queue=queue), 0)
+            stats = queue.stats()
+            self.assertEqual(stats["pending"], 1)
+            self.assertEqual(stats["done"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
