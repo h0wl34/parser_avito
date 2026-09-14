@@ -34,6 +34,7 @@ jobs:
             deal_watcher_runner.py \
             deal_feed_runner.py \
             deal_webhook_ingress.py \
+            deal_phone_ingress.py \
             deal_health_monitor.py \
             deal_alert_relay.py \
             deal_external_watchdog.py \
@@ -46,3 +47,39 @@ jobs:
           PYTHONWARNINGS: error::ResourceWarning
         run: |
           python -m unittest discover -s tests -v
+
+  android-client:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Configure Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, lint, and test Android client
+        working-directory: android_client
+        run: |
+          ./gradlew --no-daemon \
+            :app:testDebugUnitTest \
+            :app:lintDebug \
+            :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: avito-push-bridge-debug
+          path: android_client/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
