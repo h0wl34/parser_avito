@@ -1,0 +1,12 @@
+# Replace watcher.example.com with a DNS name that points to the VPS.
+# Only the signed phone callback is public. /healthz remains private.
+watcher.example.com {
+    @phone path /phone-notification
+    handle @phone {
+        reverse_proxy 127.0.0.1:18767
+    }
+
+    handle {
+        respond 404
+    }
+}

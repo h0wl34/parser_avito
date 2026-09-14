@@ -6,6 +6,7 @@ import sqlite3
 
 from deal_watcher import load_deal_watcher_config
 from deal_watcher.feed_queue import FeedEventQueue
+from deal_watcher.phone import PhoneNotificationStore
 
 
 def _db_path() -> str:
@@ -95,6 +96,24 @@ def cmd_retry_dead(args) -> int:
     return 0
 
 
+def cmd_phone_recent(args) -> int:
+    rows = PhoneNotificationStore(args.database).recent(args.limit)
+    if not rows:
+        print("No Android phone notifications stored.")
+        return 0
+    for row in rows:
+        if args.json:
+            print(row.payload_json)
+            continue
+        print(
+            f"{row.received_at}  {row.event_id[:16]}  "
+            f"package={row.package_name} device={row.device_id}"
+        )
+        print(f"  title: {row.title or '<none>'}")
+        print(f"  text:  {row.text or '<none>'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Laptop Deal Watcher queue admin")
     parser.add_argument(
@@ -115,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("event", nargs="?", help="unique event-key prefix")
     retry.add_argument("--all", action="store_true", help="revive all dead events")
     retry.set_defaults(func=cmd_retry_dead)
+
+    phone = sub.add_parser("phone-recent", help="show raw Android notification events")
+    phone.add_argument("--limit", type=int, default=20)
+    phone.add_argument("--json", action="store_true", help="print full raw JSON payload(s)")
+    phone.set_defaults(func=cmd_phone_recent)
     return parser
 
 
