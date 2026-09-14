@@ -34,8 +34,12 @@ failure_grace_seconds = 120
 consecutive_failures = 3
 # While an incident stays active, remind at most once every six hours.
 repeat_alert_seconds = 21600
-worker_heartbeat_timeout_seconds = 150
-ingress_heartbeat_timeout_seconds = 150
+# Feed/webhook heartbeats are emitted every ~30s. Heartbeat timeout itself is
+# already the grace period for process death; the health monitor therefore does
+# not add failure_grace_seconds again for these two process-heartbeat incidents.
+# Three consecutive stale observations still have to agree before alerting.
+worker_heartbeat_timeout_seconds = 90
+ingress_heartbeat_timeout_seconds = 90
 telegram_probe_seconds = 60
 # Queue/dead-letter health thresholds.
 queue_oldest_pending_seconds = 600
