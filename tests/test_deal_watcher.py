@@ -120,6 +120,47 @@ class ScoringTests(unittest.TestCase):
         self.assertGreaterEqual(analysis.score, 80)
         self.assertIn("почти новый: минимальное использование", analysis.reasons)
 
+    def test_cold_start_legion_at_4070_threshold_is_strong(self):
+        config = DealWatcherConfig()
+        specs = LaptopSpecs(
+            brand="Lenovo",
+            family="Legion 5",
+            gpu="RTX 4070",
+            ram_gb=32,
+            storage_gb=1024,
+            condition=Condition.UNKNOWN,
+        )
+        analysis = analyze_deal(
+            price=99_000,
+            specs=specs,
+            risk=assess_risk(""),
+            market=MarketStats(),
+            config=config,
+        )
+        self.assertGreaterEqual(analysis.score, 80)
+        self.assertEqual(analysis.label, "STRONG")
+        self.assertIn("cold-start: рыночной выборки пока недостаточно", analysis.reasons)
+
+    def test_cold_start_tuf_4070_at_90k_is_immediate(self):
+        config = DealWatcherConfig()
+        specs = LaptopSpecs(
+            brand="ASUS",
+            family="TUF",
+            gpu="RTX 4070",
+            ram_gb=32,
+            storage_gb=1024,
+            condition=Condition.NEW_CONFIRMED,
+        )
+        analysis = analyze_deal(
+            price=90_000,
+            specs=specs,
+            risk=assess_risk("новый не активирован"),
+            market=MarketStats(),
+            config=config,
+        )
+        self.assertGreaterEqual(analysis.score, 90)
+        self.assertEqual(analysis.label, "IMMEDIATE")
+
     def test_bad_series_and_risk_are_penalized(self):
         config = DealWatcherConfig()
         specs = LaptopSpecs(
