@@ -34,6 +34,9 @@ jobs:
             deal_watcher_runner.py \
             deal_feed_runner.py \
             deal_webhook_ingress.py \
+            deal_health_monitor.py \
+            deal_alert_relay.py \
+            deal_queue_admin.py \
             parser/http/client.py \
             tests/*.py
 
